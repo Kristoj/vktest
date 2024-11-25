@@ -14,8 +14,9 @@ import "base:runtime"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
-ENABLE_VALIDATION_LAYERS :: true
+ENABLE_VALIDATION_LAYERS :: false
 NULL_HANDLE :: 0
+MAX_FRAMES_IN_FLIGHT :: 2
 
 winWidth  : c.int = 1600
 winHeight : c.int = 900
@@ -50,11 +51,13 @@ Application :: struct
 	renderPass:       vk.RenderPass,
 	graphicsPipeline: vk.Pipeline,
 	commandPool:      vk.CommandPool,
-	commandBuffer:    vk.CommandBuffer,
+	commandBuffers:   [dynamic]vk.CommandBuffer,
 	
-	imgAvailableSemaphore:   vk.Semaphore,
-	renderFinishedSemaphore: vk.Semaphore,
-	inFlightFence:           vk.Fence,
+	imgAvailableSemaphores:   [dynamic]vk.Semaphore,
+	renderFinishedSemaphores: [dynamic]vk.Semaphore,
+	inFlightFences:           [dynamic]vk.Fence,
+	
+	currentFrame: u32,
 }
 
 app: Application
@@ -116,33 +119,33 @@ update_fps :: proc()
 
 draw_frame :: proc()
 {
-	vk.WaitForFences(app.device, 1, &app.inFlightFence, true, max(u64))
-	vk.ResetFences(app.device, 1, &app.inFlightFence)
+	vk.WaitForFences(app.device, 1, &app.inFlightFences[app.currentFrame], true, max(u64))
+	vk.ResetFences(app.device, 1, &app.inFlightFences[app.currentFrame])
 
 	imgIndex: u32
-	vk.AcquireNextImageKHR(app.device, app.swapchain, max(u64), app.imgAvailableSemaphore, NULL_HANDLE, &imgIndex)
+	vk.AcquireNextImageKHR(app.device, app.swapchain, max(u64), app.imgAvailableSemaphores[app.currentFrame], NULL_HANDLE, &imgIndex)
 
-	vk.ResetCommandBuffer(app.commandBuffer, nil) // KENTIES
-	record_command_buffer(app.commandBuffer, imgIndex)
+	vk.ResetCommandBuffer(app.commandBuffers[app.currentFrame], nil) // KENTIES
+	record_command_buffer(app.commandBuffers[app.currentFrame], imgIndex)
 	
 
 	submitInfo: vk.SubmitInfo
 	submitInfo.sType = .SUBMIT_INFO
 		
-	waitSemas:   []vk.Semaphore = {app.imgAvailableSemaphore}
+	waitSemas:   []vk.Semaphore = {app.imgAvailableSemaphores[app.currentFrame]}
 	waitStages: vk.PipelineStageFlags = {.COLOR_ATTACHMENT_OUTPUT}
 	submitInfo.waitSemaphoreCount = 1
 	submitInfo.pWaitSemaphores = raw_data(waitSemas)
 	submitInfo.pWaitDstStageMask = &waitStages
 	
 	submitInfo.commandBufferCount = 1
-	submitInfo.pCommandBuffers = &app.commandBuffer
+	submitInfo.pCommandBuffers = &app.commandBuffers[app.currentFrame]
 	
-	signalSemas: []vk.Semaphore = {app.renderFinishedSemaphore}
+	signalSemas: []vk.Semaphore = {app.renderFinishedSemaphores[app.currentFrame]}
 	submitInfo.signalSemaphoreCount = 1
 	submitInfo.pSignalSemaphores = raw_data(signalSemas)
 
-	if vk.QueueSubmit(app.graphicsQueue, 1, &submitInfo, app.inFlightFence) != .SUCCESS
+	if vk.QueueSubmit(app.graphicsQueue, 1, &submitInfo, app.inFlightFences[app.currentFrame]) != .SUCCESS
 	{
 		fmt.panicf("Failed to submit draw command buffer")
 	}
@@ -158,13 +161,18 @@ draw_frame :: proc()
 	presentInfo.pImageIndices = &imgIndex
 
 	vk.QueuePresentKHR(app.presentQueue, &presentInfo)
+
+	app.currentFrame = (app.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT
 }
 
 cleanup :: proc()
 {
-	vk.DestroySemaphore(app.device, app.imgAvailableSemaphore, nil)
-	vk.DestroySemaphore(app.device, app.renderFinishedSemaphore, nil)
-	vk.DestroyFence(app.device, app.inFlightFence, nil)
+	for i in 0..<MAX_FRAMES_IN_FLIGHT
+	{
+		vk.DestroySemaphore(app.device, app.imgAvailableSemaphores[i], nil)
+		vk.DestroySemaphore(app.device, app.renderFinishedSemaphores[i], nil)
+		vk.DestroyFence(app.device, app.inFlightFences[i], nil)
+	}
 	
 	vk.DestroyCommandPool(app.device, app.commandPool, nil)
 	
@@ -216,7 +224,7 @@ init_vulkan :: proc()
 	create_graphics_pipeline()
 	create_framebuffers()
 	create_command_pool()
-	create_command_buffer()
+	create_command_buffers()
 	create_sync_objects()
 }
 
@@ -655,15 +663,16 @@ create_command_pool :: proc()
 	}
 }
 
-create_command_buffer :: proc()
+create_command_buffers :: proc()
 {
+	resize(&app.commandBuffers, MAX_FRAMES_IN_FLIGHT)
 	allocInfo: vk.CommandBufferAllocateInfo
 	allocInfo.sType = .COMMAND_BUFFER_ALLOCATE_INFO
 	allocInfo.commandPool = app.commandPool
 	allocInfo.level = .PRIMARY
-	allocInfo.commandBufferCount = 1
+	allocInfo.commandBufferCount = u32(len(app.commandBuffers))
 
-	if vk.AllocateCommandBuffers(app.device, &allocInfo, &app.commandBuffer) != .SUCCESS
+	if vk.AllocateCommandBuffers(app.device, &allocInfo, raw_data(app.commandBuffers)) != .SUCCESS
 	{
 		fmt.panicf("Failed to allocate command buffer")
 	}
@@ -671,6 +680,10 @@ create_command_buffer :: proc()
 
 create_sync_objects :: proc()
 {
+	resize(&app.imgAvailableSemaphores,   MAX_FRAMES_IN_FLIGHT)
+	resize(&app.renderFinishedSemaphores, MAX_FRAMES_IN_FLIGHT)
+	resize(&app.inFlightFences,           MAX_FRAMES_IN_FLIGHT)
+	
 	semaInfo: vk.SemaphoreCreateInfo
 	semaInfo.sType = .SEMAPHORE_CREATE_INFO
 	
@@ -678,11 +691,14 @@ create_sync_objects :: proc()
 	fenceInfo.sType = .FENCE_CREATE_INFO
 	fenceInfo.flags = {.SIGNALED}
 
-	if  vk.CreateSemaphore(app.device, &semaInfo, nil, &app.imgAvailableSemaphore)   != .SUCCESS ||
-	    vk.CreateSemaphore(app.device, &semaInfo, nil, &app.renderFinishedSemaphore) != .SUCCESS ||
-	    vk.CreateFence(app.device, &fenceInfo, nil, &app.inFlightFence)              != .SUCCESS
+	for i in 0..<MAX_FRAMES_IN_FLIGHT
 	{
-		fmt.panicf("Failed to create synchronization objects for a frame")
+		if  vk.CreateSemaphore(app.device, &semaInfo, nil, &app.imgAvailableSemaphores[i])   != .SUCCESS ||
+		    vk.CreateSemaphore(app.device, &semaInfo, nil, &app.renderFinishedSemaphores[i]) != .SUCCESS ||
+		    vk.CreateFence(app.device, &fenceInfo, nil, &app.inFlightFences[i])              != .SUCCESS
+		{
+			fmt.panicf("Failed to create synchronization objects for a frame")
+		}
 	}
 }
 
