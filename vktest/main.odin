@@ -7,6 +7,7 @@ import "core:log"
 import "core:bytes"
 import "core:strings"
 import "core:c"
+import "core:time"
 
 import "base:runtime"
 
@@ -88,15 +89,29 @@ init_window :: proc()
 }
 
 
+lastFPSUpdateTime: f64
+fps: u32
 main_loop :: proc()
 {
 	for !glfw.WindowShouldClose(app.window)
 	{
 		glfw.PollEvents()
+		update_fps()
 		draw_frame()
 	}
 
 	vk.DeviceWaitIdle(app.device)
+}
+
+update_fps :: proc()
+{
+	fps += 1
+	if glfw.GetTime() >= lastFPSUpdateTime + 1
+	{
+		fmt.println("FPS:", fps)
+		lastFPSUpdateTime = glfw.GetTime()
+		fps = 0
+	}
 }
 
 draw_frame :: proc()
@@ -465,7 +480,7 @@ create_render_pass :: proc()
 	dep.srcSubpass = vk.SUBPASS_EXTERNAL
 	dep.dstSubpass = 0
 	dep.srcStageMask = {.COLOR_ATTACHMENT_OUTPUT}
-	dep.srcAccessMask = nil
+	dep.srcAccessMask = nil // FIX: This was normally nil
 	dep.dstStageMask = {.COLOR_ATTACHMENT_OUTPUT}
 	dep.dstAccessMask = {.COLOR_ATTACHMENT_WRITE}
 
@@ -545,13 +560,7 @@ create_graphics_pipeline :: proc()
 
 	colorBlendAttachment: vk.PipelineColorBlendAttachmentState
 	colorBlendAttachment.blendEnable = false
-	// colorBlendAttachment.colorWriteMask = {.R, .G, .B, .A}
-	// colorBlendAttachment.srcColorBlendFactor = .ONE
-	// colorBlendAttachment.dstColorBlendFactor = .ZERO
-	// colorBlendAttachment.colorBlendOp = .ADD
-	// colorBlendAttachment.srcAlphaBlendFactor = .ONE
-	// colorBlendAttachment.dstAlphaBlendFactor = .ZERO
-	// colorBlendAttachment.alphaBlendOp = .ADD
+	colorBlendAttachment.colorWriteMask = {.R, .G, .B, .A}
 
 	colorBlendInfo: vk.PipelineColorBlendStateCreateInfo
 	colorBlendInfo.sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
@@ -691,6 +700,7 @@ record_command_buffer :: proc(buffer: vk.CommandBuffer, index: u32)
 	renderInfo.sType = .RENDER_PASS_BEGIN_INFO
 	renderInfo.renderPass = app.renderPass
 	renderInfo.framebuffer = app.swapFramebuffers[index]
+	renderInfo.renderArea.offset = {0, 0}
 	renderInfo.renderArea.extent = app.swapExtent
 
 	col: vk.ClearColorValue = {float32 = [4]f32{0, 0, 0, 1}}
@@ -709,6 +719,7 @@ record_command_buffer :: proc(buffer: vk.CommandBuffer, index: u32)
 	vk.CmdSetViewport(buffer, 0, 1, &viewport)
 
 	scissor: vk.Rect2D
+	scissor.offset = {0, 0}
 	scissor.extent = app.swapExtent
 	vk.CmdSetScissor(buffer, 0, 1, &scissor)
 
@@ -727,6 +738,7 @@ create_shader_module :: proc(code: []byte) -> vk.ShaderModule
 	createInfo: vk.ShaderModuleCreateInfo
 	createInfo.sType = .SHADER_MODULE_CREATE_INFO
 	createInfo.codeSize = len(code)
+	
 	// FIX Aligment maybe fucked
 	createInfo.pCode = cast(^u32)raw_data(code)
 
