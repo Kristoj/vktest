@@ -48,6 +48,12 @@ Application :: struct
 	pipelineLayout:   vk.PipelineLayout,
 	renderPass:       vk.RenderPass,
 	graphicsPipeline: vk.Pipeline,
+	commandPool:      vk.CommandPool,
+	commandBuffer:    vk.CommandBuffer,
+	
+	imgAvailableSemaphore:   vk.Semaphore,
+	renderFinishedSemaphore: vk.Semaphore,
+	inFlightFence:           vk.Fence,
 }
 
 app: Application
@@ -87,12 +93,66 @@ main_loop :: proc()
 	for !glfw.WindowShouldClose(app.window)
 	{
 		glfw.PollEvents()
+		draw_frame()
 	}
 
+	vk.DeviceWaitIdle(app.device)
+}
+
+draw_frame :: proc()
+{
+	vk.WaitForFences(app.device, 1, &app.inFlightFence, true, max(u64))
+	vk.ResetFences(app.device, 1, &app.inFlightFence)
+
+	imgIndex: u32
+	vk.AcquireNextImageKHR(app.device, app.swapchain, max(u64), app.imgAvailableSemaphore, NULL_HANDLE, &imgIndex)
+
+	vk.ResetCommandBuffer(app.commandBuffer, nil) // KENTIES
+	record_command_buffer(app.commandBuffer, imgIndex)
+	
+
+	submitInfo: vk.SubmitInfo
+	submitInfo.sType = .SUBMIT_INFO
+		
+	waitSemas:   []vk.Semaphore = {app.imgAvailableSemaphore}
+	waitStages: vk.PipelineStageFlags = {.COLOR_ATTACHMENT_OUTPUT}
+	submitInfo.waitSemaphoreCount = 1
+	submitInfo.pWaitSemaphores = raw_data(waitSemas)
+	submitInfo.pWaitDstStageMask = &waitStages
+	
+	submitInfo.commandBufferCount = 1
+	submitInfo.pCommandBuffers = &app.commandBuffer
+	
+	signalSemas: []vk.Semaphore = {app.renderFinishedSemaphore}
+	submitInfo.signalSemaphoreCount = 1
+	submitInfo.pSignalSemaphores = raw_data(signalSemas)
+
+	if vk.QueueSubmit(app.graphicsQueue, 1, &submitInfo, app.inFlightFence) != .SUCCESS
+	{
+		fmt.panicf("Failed to submit draw command buffer")
+	}
+
+	presentInfo: vk.PresentInfoKHR
+	presentInfo.sType = .PRESENT_INFO_KHR
+	presentInfo.waitSemaphoreCount = 1
+	presentInfo.pWaitSemaphores = raw_data(signalSemas)
+
+	swapchains: []vk.SwapchainKHR = {app.swapchain}
+	presentInfo.swapchainCount = 1
+	presentInfo.pSwapchains = raw_data(swapchains)
+	presentInfo.pImageIndices = &imgIndex
+
+	vk.QueuePresentKHR(app.presentQueue, &presentInfo)
 }
 
 cleanup :: proc()
 {
+	vk.DestroySemaphore(app.device, app.imgAvailableSemaphore, nil)
+	vk.DestroySemaphore(app.device, app.renderFinishedSemaphore, nil)
+	vk.DestroyFence(app.device, app.inFlightFence, nil)
+	
+	vk.DestroyCommandPool(app.device, app.commandPool, nil)
+	
 	for buffer in app.swapFramebuffers
 	{
 		vk.DestroyFramebuffer(app.device, buffer, nil)
@@ -140,6 +200,9 @@ init_vulkan :: proc()
 	create_render_pass()
 	create_graphics_pipeline()
 	create_framebuffers()
+	create_command_pool()
+	create_command_buffer()
+	create_sync_objects()
 }
 
 create_instance :: proc()
@@ -398,12 +461,22 @@ create_render_pass :: proc()
 	subpass.colorAttachmentCount = 1
 	subpass.pColorAttachments = &colorAttachmentRef
 	
+	dep: vk.SubpassDependency
+	dep.srcSubpass = vk.SUBPASS_EXTERNAL
+	dep.dstSubpass = 0
+	dep.srcStageMask = {.COLOR_ATTACHMENT_OUTPUT}
+	dep.srcAccessMask = nil
+	dep.dstStageMask = {.COLOR_ATTACHMENT_OUTPUT}
+	dep.dstAccessMask = {.COLOR_ATTACHMENT_WRITE}
+
 	renderPassInfo: vk.RenderPassCreateInfo
 	renderPassInfo.sType = .RENDER_PASS_CREATE_INFO
 	renderPassInfo.attachmentCount = 1
 	renderPassInfo.pAttachments = &colorAttachment
 	renderPassInfo.subpassCount = 1
 	renderPassInfo.pSubpasses = &subpass
+	renderPassInfo.dependencyCount = 1
+	renderPassInfo.pDependencies = &dep
 
 	if vk.CreateRenderPass(app.device, &renderPassInfo, nil, &app.renderPass) != .SUCCESS
 	{
@@ -557,6 +630,95 @@ create_framebuffers :: proc()
 		}
 	}
 	
+}
+
+create_command_pool :: proc()
+{
+	indices := find_queue_families(app.physicalDevice)
+	poolInfo: vk.CommandPoolCreateInfo
+	poolInfo.sType = .COMMAND_POOL_CREATE_INFO
+	poolInfo.flags = {.RESET_COMMAND_BUFFER}
+	poolInfo.queueFamilyIndex = indices.graphicsFamily.(u32)
+
+	if vk.CreateCommandPool(app.device, &poolInfo, nil, &app.commandPool) != .SUCCESS
+	{
+		fmt.panicf("Failed to create commandpool")
+	}
+}
+
+create_command_buffer :: proc()
+{
+	allocInfo: vk.CommandBufferAllocateInfo
+	allocInfo.sType = .COMMAND_BUFFER_ALLOCATE_INFO
+	allocInfo.commandPool = app.commandPool
+	allocInfo.level = .PRIMARY
+	allocInfo.commandBufferCount = 1
+
+	if vk.AllocateCommandBuffers(app.device, &allocInfo, &app.commandBuffer) != .SUCCESS
+	{
+		fmt.panicf("Failed to allocate command buffer")
+	}
+}
+
+create_sync_objects :: proc()
+{
+	semaInfo: vk.SemaphoreCreateInfo
+	semaInfo.sType = .SEMAPHORE_CREATE_INFO
+	
+	fenceInfo: vk.FenceCreateInfo
+	fenceInfo.sType = .FENCE_CREATE_INFO
+	fenceInfo.flags = {.SIGNALED}
+
+	if  vk.CreateSemaphore(app.device, &semaInfo, nil, &app.imgAvailableSemaphore)   != .SUCCESS ||
+	    vk.CreateSemaphore(app.device, &semaInfo, nil, &app.renderFinishedSemaphore) != .SUCCESS ||
+	    vk.CreateFence(app.device, &fenceInfo, nil, &app.inFlightFence)              != .SUCCESS
+	{
+		fmt.panicf("Failed to create synchronization objects for a frame")
+	}
+}
+
+record_command_buffer :: proc(buffer: vk.CommandBuffer, index: u32)
+{
+	beginInfo: vk.CommandBufferBeginInfo
+	beginInfo.sType = .COMMAND_BUFFER_BEGIN_INFO
+
+	if vk.BeginCommandBuffer(buffer, &beginInfo) != .SUCCESS
+	{
+		fmt.panicf("Failed to begin recording command buffer")
+	}
+
+	renderInfo: vk.RenderPassBeginInfo
+	renderInfo.sType = .RENDER_PASS_BEGIN_INFO
+	renderInfo.renderPass = app.renderPass
+	renderInfo.framebuffer = app.swapFramebuffers[index]
+	renderInfo.renderArea.extent = app.swapExtent
+
+	col: vk.ClearColorValue = {float32 = [4]f32{0, 0, 0, 1}}
+	clearValue: vk.ClearValue = {color = col}
+	renderInfo.clearValueCount = 1
+	renderInfo.pClearValues = &clearValue
+
+	vk.CmdBeginRenderPass(buffer, &renderInfo, .INLINE)
+	vk.CmdBindPipeline(buffer, .GRAPHICS, app.graphicsPipeline)
+
+	viewport: vk.Viewport
+	viewport.width = f32(app.swapExtent.width)
+	viewport.height = f32(app.swapExtent.height)
+	viewport.minDepth = 0
+	viewport.maxDepth = 1
+	vk.CmdSetViewport(buffer, 0, 1, &viewport)
+
+	scissor: vk.Rect2D
+	scissor.extent = app.swapExtent
+	vk.CmdSetScissor(buffer, 0, 1, &scissor)
+
+	vk.CmdDraw(buffer, 3, 1, 0, 0)
+	vk.CmdEndRenderPass(buffer)
+
+	if vk.EndCommandBuffer(buffer) != .SUCCESS
+	{
+		fmt.panicf("Failed to record command buffer")
+	}
 }
 
 create_shader_module :: proc(code: []byte) -> vk.ShaderModule
