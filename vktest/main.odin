@@ -14,12 +14,15 @@ import "base:runtime"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
-ENABLE_VALIDATION_LAYERS :: false
+ENABLE_VALIDATION_LAYERS :: true
 NULL_HANDLE :: 0
 MAX_FRAMES_IN_FLIGHT :: 2
 
 winWidth  : c.int = 1600
 winHeight : c.int = 900
+
+lastFPSUpdateTime: f64
+fps: u32
 
 validationLayers: []cstring:
 {
@@ -32,35 +35,37 @@ deviceExtensions := []cstring {
  
 Application :: struct
 {
-	window:           glfw.WindowHandle,
-	instance:         vk.Instance,
-	extensions:       []vk.ExtensionProperties,
-	debugMessenger:   vk.DebugUtilsMessengerEXT,
-	physicalDevice:   vk.PhysicalDevice,
-	device:           vk.Device,
-	graphicsQueue:    vk.Queue,
-	presentQueue:     vk.Queue,
-	surface:          vk.SurfaceKHR,
-	swapchain:        vk.SwapchainKHR,
-	swapImages:       [dynamic]vk.Image,
-	swapImageFormat:  vk.Format,
-	swapImageViews:   [dynamic]vk.ImageView,
-	swapFramebuffers: [dynamic]vk.Framebuffer,
-	swapExtent:       vk.Extent2D,
-	pipelineLayout:   vk.PipelineLayout,
-	renderPass:       vk.RenderPass,
-	graphicsPipeline: vk.Pipeline,
-	commandPool:      vk.CommandPool,
-	commandBuffers:   [dynamic]vk.CommandBuffer,
+	window:             glfw.WindowHandle,
+	instance:           vk.Instance,
+	extensions:         []vk.ExtensionProperties,
+	debugMessenger:     vk.DebugUtilsMessengerEXT,
+	physicalDevice:     vk.PhysicalDevice,
+	device:             vk.Device,
+	graphicsQueue:      vk.Queue,
+	presentQueue:       vk.Queue,
+	surface:            vk.SurfaceKHR,
+	swapchain:          vk.SwapchainKHR,
+	swapImages:         [dynamic]vk.Image,
+	swapImageFormat:    vk.Format,
+	swapImageViews:     [dynamic]vk.ImageView,
+	swapFramebuffers:   [dynamic]vk.Framebuffer,
+	swapExtent:         vk.Extent2D,
+	pipelineLayout:     vk.PipelineLayout,
+	renderPass:         vk.RenderPass,
+	graphicsPipeline:   vk.Pipeline,
+	commandPool:        vk.CommandPool,
+	commandBuffers:     [dynamic]vk.CommandBuffer,
+	
 	
 	imgAvailableSemaphores:   [dynamic]vk.Semaphore,
 	renderFinishedSemaphores: [dynamic]vk.Semaphore,
 	inFlightFences:           [dynamic]vk.Fence,
 	
-	currentFrame: u32,
+	wasFramebufferResized: bool,
+	currentFrame:         u32,
 }
-
 app: Application
+
 
 QueueFamilyIndices :: struct
 {
@@ -85,15 +90,19 @@ init_window :: proc()
 	}
 
 	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
-	glfw.WindowHint(glfw.RESIZABLE,  glfw.FALSE)
+	glfw.WindowHint(glfw.RESIZABLE,  glfw.TRUE)
 	app.window = glfw.CreateWindow(winWidth, winHeight, "VKTEST", nil, nil)
-	glfw.SetKeyCallback(app.window, key_callback)
 	glfw.MakeContextCurrent(app.window)
+	
+	glfw.SetKeyCallback(app.window, key_callback)
+	glfw.SetFramebufferSizeCallback(app.window, framebuffer_size_callback)
 }
 
+framebuffer_size_callback :: proc "c" (window: glfw.WindowHandle, width, height: c.int)
+{
+	app.wasFramebufferResized = true
+}
 
-lastFPSUpdateTime: f64
-fps: u32
 main_loop :: proc()
 {
 	for !glfw.WindowShouldClose(app.window)
@@ -120,10 +129,20 @@ update_fps :: proc()
 draw_frame :: proc()
 {
 	vk.WaitForFences(app.device, 1, &app.inFlightFences[app.currentFrame], true, max(u64))
-	vk.ResetFences(app.device, 1, &app.inFlightFences[app.currentFrame])
 
 	imgIndex: u32
-	vk.AcquireNextImageKHR(app.device, app.swapchain, max(u64), app.imgAvailableSemaphores[app.currentFrame], NULL_HANDLE, &imgIndex)
+	result := vk.AcquireNextImageKHR(app.device, app.swapchain, max(u64), app.imgAvailableSemaphores[app.currentFrame], NULL_HANDLE, &imgIndex)
+	if result == .ERROR_OUT_OF_DATE_KHR
+	{
+		recreate_swapchain()
+		return
+	}
+	else if result != .SUCCESS && result != .SUBOPTIMAL_KHR
+	{
+		fmt.panicf("Failed to acquire swapchain image")
+	}
+	
+	vk.ResetFences(app.device, 1, &app.inFlightFences[app.currentFrame])
 
 	vk.ResetCommandBuffer(app.commandBuffers[app.currentFrame], nil) // KENTIES
 	record_command_buffer(app.commandBuffers[app.currentFrame], imgIndex)
@@ -160,13 +179,28 @@ draw_frame :: proc()
 	presentInfo.pSwapchains = raw_data(swapchains)
 	presentInfo.pImageIndices = &imgIndex
 
-	vk.QueuePresentKHR(app.presentQueue, &presentInfo)
+	result = vk.QueuePresentKHR(app.presentQueue, &presentInfo)
+	if result == .ERROR_OUT_OF_DATE_KHR || result == .SUBOPTIMAL_KHR || app.wasFramebufferResized
+	{
+		app.wasFramebufferResized = false
+		recreate_swapchain()
+	}
+	else if result != .SUCCESS
+	{
+		fmt.panicf("Failed to acquire swapchain image")
+	}
 
 	app.currentFrame = (app.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT
 }
 
 cleanup :: proc()
 {
+	cleanup_swapchain()
+	
+	vk.DestroyPipeline(app.device, app.graphicsPipeline, nil)
+	vk.DestroyPipelineLayout(app.device, app.pipelineLayout, nil)
+	vk.DestroyRenderPass(app.device, app.renderPass, nil)
+	
 	for i in 0..<MAX_FRAMES_IN_FLIGHT
 	{
 		vk.DestroySemaphore(app.device, app.imgAvailableSemaphores[i], nil)
@@ -175,23 +209,8 @@ cleanup :: proc()
 	}
 	
 	vk.DestroyCommandPool(app.device, app.commandPool, nil)
-	
-	for buffer in app.swapFramebuffers
-	{
-		vk.DestroyFramebuffer(app.device, buffer, nil)
-	}
-	
-	vk.DestroyPipeline(app.device, app.graphicsPipeline, nil)
-	vk.DestroyPipelineLayout(app.device, app.pipelineLayout, nil)
-	vk.DestroyRenderPass(app.device, app.renderPass, nil)
-	
-	for view in app.swapImageViews
-	{
-		vk.DestroyImageView(app.device, view, nil)
-	}
-	
-	vk.DestroySwapchainKHR(app.device, app.swapchain, nil)
 	vk.DestroyDevice(app.device, nil)
+	
 	if ENABLE_VALIDATION_LAYERS
 	{
 		vk.DestroyDebugUtilsMessengerEXT(app.instance, app.debugMessenger, nil)
@@ -362,6 +381,47 @@ create_surface :: proc()
 	{
 		fmt.panicf("Could not create window surface")
 	}
+}
+
+cleanup_swapchain :: proc()
+{
+	for buffer in app.swapFramebuffers
+	{
+		vk.DestroyFramebuffer(app.device, buffer, nil)
+	}
+	
+	for view in app.swapImageViews
+	{
+		vk.DestroyImageView(app.device, view, nil)
+	}
+	
+	vk.DestroySwapchainKHR(app.device, app.swapchain, nil)
+}
+
+recreate_swapchain :: proc()
+{
+	// Pause the program while it is minimized
+	for
+	{
+		if glfw.WindowShouldClose(app.window)
+		{
+			return
+		}
+		
+		w, h := glfw.GetFramebufferSize(app.window)
+		glfw.WaitEvents()
+		if (w != 0 && h != 0) 
+		{
+			break
+		}
+	}
+
+	vk.DeviceWaitIdle(app.device)
+	cleanup_swapchain()
+	
+	create_swapchain()
+	create_image_views()
+	create_framebuffers()
 }
 
 create_swapchain :: proc()
