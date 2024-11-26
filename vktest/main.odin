@@ -3,11 +3,13 @@ package vktest
 import "core:fmt"
 import "core:os"
 import "core:math"
+import "core:math/linalg"
 import "core:log"
 import "core:bytes"
 import "core:strings"
 import "core:c"
 import "core:time"
+import "core:mem"
 
 import "base:runtime"
 
@@ -15,6 +17,8 @@ import "vendor:glfw"
 import vk "vendor:vulkan"
 
 ENABLE_VALIDATION_LAYERS :: true
+shouldPrintFps := false
+
 NULL_HANDLE :: 0
 MAX_FRAMES_IN_FLIGHT :: 2
 
@@ -55,7 +59,8 @@ Application :: struct
 	graphicsPipeline:   vk.Pipeline,
 	commandPool:        vk.CommandPool,
 	commandBuffers:     [dynamic]vk.CommandBuffer,
-	
+	vertexBuffer:       vk.Buffer,
+	vertexBufferMemory: vk.DeviceMemory,
 	
 	imgAvailableSemaphores:   [dynamic]vk.Semaphore,
 	renderFinishedSemaphores: [dynamic]vk.Semaphore,
@@ -78,6 +83,45 @@ SwapchainSupportDetails :: struct
 	capabilities:  vk.SurfaceCapabilitiesKHR,
 	formats:      [dynamic]vk.SurfaceFormatKHR,
 	presentModes: [dynamic]vk.PresentModeKHR,
+}
+
+Vec2 :: linalg.Vector2f32
+Vec3 :: linalg.Vector3f32
+
+Vertex :: struct
+{
+	pos: Vec2,
+	col: Vec3,
+}
+
+vertices: []Vertex = {
+	Vertex{{ 0,   -0.5}, {1, 0, 0}},
+	Vertex{{ 0.5,  0.5}, {0, 1, 0}},
+	Vertex{{-0.5,  0.5}, {0, 0, 1}},
+}
+
+get_binding_description :: proc() -> vk.VertexInputBindingDescription
+{
+	desc: vk.VertexInputBindingDescription
+	desc.binding = 0
+	desc.stride = size_of(Vertex)
+	desc.inputRate = .VERTEX
+	return desc
+}
+
+get_attribute_description :: proc() -> []vk.VertexInputAttributeDescription
+{
+	desc := make([]vk.VertexInputAttributeDescription, 2)
+	desc[0].binding = 0
+	desc[0].location = 0
+	desc[0].format = .R32G32_SFLOAT
+	desc[0].offset = u32(offset_of_by_string(Vertex, "pos"))
+
+	desc[1].binding = 0
+	desc[1].location = 1
+	desc[1].format = .R32G32B32_SFLOAT
+	desc[1].offset = u32(offset_of_by_string(Vertex, "col"))
+	return desc
 }
 
 init_window :: proc()
@@ -117,6 +161,11 @@ main_loop :: proc()
 
 update_fps :: proc()
 {
+	if !shouldPrintFps	
+	{
+		return
+	}
+	
 	fps += 1
 	if glfw.GetTime() >= lastFPSUpdateTime + 1
 	{
@@ -196,6 +245,9 @@ draw_frame :: proc()
 cleanup :: proc()
 {
 	cleanup_swapchain()
+
+	vk.DestroyBuffer(app.device, app.vertexBuffer, nil)
+	vk.FreeMemory(app.device, app.vertexBufferMemory, nil)
 	
 	vk.DestroyPipeline(app.device, app.graphicsPipeline, nil)
 	vk.DestroyPipelineLayout(app.device, app.pipelineLayout, nil)
@@ -243,6 +295,7 @@ init_vulkan :: proc()
 	create_graphics_pipeline()
 	create_framebuffers()
 	create_command_pool()
+	create_vertex_buffer()
 	create_command_buffers()
 	create_sync_objects()
 }
@@ -589,9 +642,15 @@ create_graphics_pipeline :: proc()
 
 	shaderStages := []vk.PipelineShaderStageCreateInfo {vertInfo, fragInfo}
 	
-	// NOTE: Do i need to specify all things ?
+	bindingDesc := get_binding_description()
+	attributeDesc := get_attribute_description()
+	
 	vertInputInfo: vk.PipelineVertexInputStateCreateInfo
 	vertInputInfo.sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+	vertInputInfo.vertexBindingDescriptionCount = 1
+	vertInputInfo.vertexAttributeDescriptionCount = u32(len(attributeDesc))
+	vertInputInfo.pVertexBindingDescriptions = &bindingDesc
+	vertInputInfo.pVertexAttributeDescriptions = raw_data(attributeDesc)
 
 	inputAssembly: vk.PipelineInputAssemblyStateCreateInfo
 	inputAssembly.sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
@@ -723,6 +782,63 @@ create_command_pool :: proc()
 	}
 }
 
+create_buffer :: proc(size: vk.DeviceSize, usage: vk.BufferUsageFlags, props: vk.MemoryPropertyFlags,
+				 buf: ^vk.Buffer, bufMem: ^vk.DeviceMemory)
+{
+	
+	bufferInfo: vk.BufferCreateInfo
+	bufferInfo.sType = .BUFFER_CREATE_INFO
+	bufferInfo.size = size
+	bufferInfo.usage = usage
+	bufferInfo.sharingMode = .EXCLUSIVE
+
+	if vk.CreateBuffer(app.device, &bufferInfo, nil, buf) != .SUCCESS
+	{
+		fmt.panicf("Failed to create buffer")
+	}
+
+	memReqs: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(app.device, buf^, &memReqs)
+
+	allocInfo: vk.MemoryAllocateInfo
+	allocInfo.sType = .MEMORY_ALLOCATE_INFO
+	allocInfo.allocationSize = memReqs.size
+	allocInfo.memoryTypeIndex = find_memory_type(memReqs.memoryTypeBits, props)
+
+	if vk.AllocateMemory(app.device, &allocInfo, nil, bufMem) != .SUCCESS
+	{
+		fmt.panicf("Failed to allocate memory for vertex buffer")
+	}
+
+	vk.BindBufferMemory(app.device, buf^, bufMem^, 0)
+}
+
+create_vertex_buffer :: proc()
+{
+	bufSize := size_of(vertices[0]) * len(vertices)
+	create_buffer(vk.DeviceSize(bufSize), {.VERTEX_BUFFER}, {.HOST_VISIBLE, .HOST_COHERENT}, &app.vertexBuffer, &app.vertexBufferMemory)
+	data: rawptr
+	vk.MapMemory(app.device, app.vertexBufferMemory, 0, vk.DeviceSize(bufSize), nil, &data)
+	mem.copy(data, &vertices[0], bufSize)
+	vk.UnmapMemory(app.device, app.vertexBufferMemory)
+}
+
+find_memory_type :: proc(filter: u32, flags: vk.MemoryPropertyFlags) -> u32
+{
+	memProps: vk.PhysicalDeviceMemoryProperties
+	vk.GetPhysicalDeviceMemoryProperties(app.physicalDevice, &memProps)
+
+	for i in 0..<memProps.memoryTypeCount
+	{
+		if filter & (1 << i) != 0 && memProps.memoryTypes[i].propertyFlags & flags == flags // Maybe fucked
+		{
+			return u32(i)
+		}
+	}
+
+	fmt.panicf("Failed to find suitable memory type")
+}
+
 create_command_buffers :: proc()
 {
 	resize(&app.commandBuffers, MAX_FRAMES_IN_FLIGHT)
@@ -787,6 +903,10 @@ record_command_buffer :: proc(buffer: vk.CommandBuffer, index: u32)
 	vk.CmdBeginRenderPass(buffer, &renderInfo, .INLINE)
 	vk.CmdBindPipeline(buffer, .GRAPHICS, app.graphicsPipeline)
 
+	vertexBuffers: []vk.Buffer = {app.vertexBuffer}
+	deviceOffsets: []vk.DeviceSize = {0}
+	vk.CmdBindVertexBuffers(buffer, 0, 1, raw_data(vertexBuffers), raw_data(deviceOffsets))
+
 	viewport: vk.Viewport
 	viewport.width = f32(app.swapExtent.width)
 	viewport.height = f32(app.swapExtent.height)
@@ -799,7 +919,7 @@ record_command_buffer :: proc(buffer: vk.CommandBuffer, index: u32)
 	scissor.extent = app.swapExtent
 	vk.CmdSetScissor(buffer, 0, 1, &scissor)
 
-	vk.CmdDraw(buffer, 3, 1, 0, 0)
+	vk.CmdDraw(buffer, u32(len(vertices)), 1, 0, 0)
 	vk.CmdEndRenderPass(buffer)
 
 	if vk.EndCommandBuffer(buffer) != .SUCCESS
