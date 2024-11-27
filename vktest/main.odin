@@ -17,7 +17,7 @@ import "vendor:glfw"
 import vk "vendor:vulkan"
 
 ENABLE_VALIDATION_LAYERS :: true
-shouldPrintFps := false
+shouldPrintFps := true
 
 NULL_HANDLE :: 0
 MAX_FRAMES_IN_FLIGHT :: 2
@@ -39,35 +39,45 @@ deviceExtensions := []cstring {
  
 Application :: struct
 {
-	window:             glfw.WindowHandle,
-	instance:           vk.Instance,
-	extensions:         []vk.ExtensionProperties,
-	debugMessenger:     vk.DebugUtilsMessengerEXT,
-	physicalDevice:     vk.PhysicalDevice,
-	device:             vk.Device,
-	graphicsQueue:      vk.Queue,
-	presentQueue:       vk.Queue,
-	surface:            vk.SurfaceKHR,
-	swapchain:          vk.SwapchainKHR,
-	swapImages:         [dynamic]vk.Image,
-	swapImageFormat:    vk.Format,
-	swapImageViews:     [dynamic]vk.ImageView,
-	swapFramebuffers:   [dynamic]vk.Framebuffer,
-	swapExtent:         vk.Extent2D,
-	pipelineLayout:     vk.PipelineLayout,
-	renderPass:         vk.RenderPass,
-	graphicsPipeline:   vk.Pipeline,
-	commandPool:        vk.CommandPool,
-	commandBuffers:     [dynamic]vk.CommandBuffer,
-	vertexBuffer:       vk.Buffer,
-	vertexBufferMemory: vk.DeviceMemory,
+	window:              glfw.WindowHandle,
+	instance:            vk.Instance,
+	extensions:          []vk.ExtensionProperties,
+	debugMessenger:      vk.DebugUtilsMessengerEXT,
+	physicalDevice:      vk.PhysicalDevice,
+	device:              vk.Device,
+	graphicsQueue:       vk.Queue,
+	presentQueue:        vk.Queue,
+	surface:             vk.SurfaceKHR,
+	swapchain:           vk.SwapchainKHR,
+	swapImages:          [dynamic]vk.Image,
+	swapImageFormat:     vk.Format,
+	swapImageViews:      [dynamic]vk.ImageView,
+	swapFramebuffers:    [dynamic]vk.Framebuffer,
+	swapExtent:          vk.Extent2D,
+	descriptorPool:      vk.DescriptorPool,
+	descriptorSetLayout: vk.DescriptorSetLayout,
+	pipelineLayout:      vk.PipelineLayout,
+	renderPass:          vk.RenderPass,
+	graphicsPipeline:    vk.Pipeline,
+	commandPool:         vk.CommandPool,
+	commandBuffers:      [dynamic]vk.CommandBuffer,
+	vertexBuffer:        vk.Buffer,
+	vertexBufferMemory:  vk.DeviceMemory,
+	indexBuffer:         vk.Buffer,
+	indexBufferMemory:   vk.DeviceMemory,
+
+	uniformBuffers:       [dynamic]vk.Buffer,
+	uniformBuffersMemory: [dynamic]vk.DeviceMemory,
+	uniformBuffersMapped: [dynamic]rawptr,
 	
 	imgAvailableSemaphores:   [dynamic]vk.Semaphore,
 	renderFinishedSemaphores: [dynamic]vk.Semaphore,
 	inFlightFences:           [dynamic]vk.Fence,
 	
 	wasFramebufferResized: bool,
-	currentFrame:         u32,
+	currentFrame:          u32,
+	lastFrameRenderTime:   f64,
+	dt:                    f32,
 }
 app: Application
 
@@ -85,6 +95,14 @@ SwapchainSupportDetails :: struct
 	presentModes: [dynamic]vk.PresentModeKHR,
 }
 
+Mat4 :: linalg.Matrix4x4f32
+UniformBufferObject :: struct
+{
+	model: Mat4,
+	view:  Mat4,
+	proj:  Mat4,
+}
+
 Vec2 :: linalg.Vector2f32
 Vec3 :: linalg.Vector3f32
 
@@ -95,9 +113,14 @@ Vertex :: struct
 }
 
 vertices: []Vertex = {
-	Vertex{{ 0,   -0.5}, {1, 0, 0}},
-	Vertex{{ 0.5,  0.5}, {0, 1, 0}},
-	Vertex{{-0.5,  0.5}, {0, 0, 1}},
+	Vertex{{-0.5, -0.5}, {1, 0, 0}},
+	Vertex{{ 0.5, -0.5}, {0, 1, 0}},
+	Vertex{{ 0.5,  0.5}, {0, 0, 1}},
+	Vertex{{-0.5,  0.5}, {1, 1, 1}},
+}
+
+indices: []u16 = {
+	0, 1, 2, 2, 3, 0
 }
 
 get_binding_description :: proc() -> vk.VertexInputBindingDescription
@@ -153,6 +176,13 @@ main_loop :: proc()
 	{
 		glfw.PollEvents()
 		update_fps()
+		
+		// Update deltatime
+		curTime := glfw.GetTime()
+		app.dt = f32(curTime - app.lastFrameRenderTime)
+		app.lastFrameRenderTime = curTime
+		
+		
 		draw_frame()
 	}
 
@@ -178,6 +208,8 @@ update_fps :: proc()
 draw_frame :: proc()
 {
 	vk.WaitForFences(app.device, 1, &app.inFlightFences[app.currentFrame], true, max(u64))
+
+	update_uniform_buffer(app.currentFrame)
 
 	imgIndex: u32
 	result := vk.AcquireNextImageKHR(app.device, app.swapchain, max(u64), app.imgAvailableSemaphores[app.currentFrame], NULL_HANDLE, &imgIndex)
@@ -246,8 +278,19 @@ cleanup :: proc()
 {
 	cleanup_swapchain()
 
+	for i in 0..<MAX_FRAMES_IN_FLIGHT
+	{
+		vk.DestroyBuffer(app.device, app.uniformBuffers[i], nil)
+		vk.FreeMemory(app.device, app.uniformBuffersMemory[i], nil)
+	}
+	
+	vk.DestroyDescriptorSetLayout(app.device, app.descriptorSetLayout, nil)
+
 	vk.DestroyBuffer(app.device, app.vertexBuffer, nil)
 	vk.FreeMemory(app.device, app.vertexBufferMemory, nil)
+	
+	vk.DestroyBuffer(app.device, app.indexBuffer, nil)
+	vk.FreeMemory(app.device, app.indexBufferMemory, nil)
 	
 	vk.DestroyPipeline(app.device, app.graphicsPipeline, nil)
 	vk.DestroyPipelineLayout(app.device, app.pipelineLayout, nil)
@@ -292,10 +335,15 @@ init_vulkan :: proc()
 	create_swapchain()
 	create_image_views()
 	create_render_pass()
+	create_descriptor_set_layout()
 	create_graphics_pipeline()
 	create_framebuffers()
 	create_command_pool()
 	create_vertex_buffer()
+	create_index_buffer()
+	create_uniform_buffers()
+	create_descriptor_pool()
+	create_descriptor_sets()
 	create_command_buffers()
 	create_sync_objects()
 }
@@ -620,6 +668,25 @@ create_render_pass :: proc()
 	}
 }
 
+create_descriptor_set_layout :: proc()
+{
+	binding: vk.DescriptorSetLayoutBinding
+	binding.binding = 0
+	binding.descriptorType = .UNIFORM_BUFFER
+	binding.descriptorCount = 1
+	binding.stageFlags = {.VERTEX}
+
+	layoutInfo: vk.DescriptorSetLayoutCreateInfo
+	layoutInfo.sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO
+	layoutInfo.bindingCount = 1
+	layoutInfo.pBindings = &binding
+
+	if vk.CreateDescriptorSetLayout(app.device, &layoutInfo, nil, &app.descriptorSetLayout) != .SUCCESS
+	{
+		fmt.panicf("Failed to create descriptor set layout")
+	}
+}
+
 create_graphics_pipeline :: proc()
 {
 	vertCode := read_file("res/shaders/vert.spv")
@@ -698,6 +765,8 @@ create_graphics_pipeline :: proc()
 
 	pipeLayoutInfo: vk.PipelineLayoutCreateInfo
 	pipeLayoutInfo.sType = .PIPELINE_LAYOUT_CREATE_INFO
+	pipeLayoutInfo.setLayoutCount = 1
+	pipeLayoutInfo.pSetLayouts = &app.descriptorSetLayout
 	if vk.CreatePipelineLayout(app.device, &pipeLayoutInfo, nil, &app.pipelineLayout) != .SUCCESS
 	{
 		fmt.panicf("Could not create pipeline layout")
@@ -815,12 +884,126 @@ create_buffer :: proc(size: vk.DeviceSize, usage: vk.BufferUsageFlags, props: vk
 
 create_vertex_buffer :: proc()
 {
-	bufSize := size_of(vertices[0]) * len(vertices)
-	create_buffer(vk.DeviceSize(bufSize), {.VERTEX_BUFFER}, {.HOST_VISIBLE, .HOST_COHERENT}, &app.vertexBuffer, &app.vertexBufferMemory)
+	bufSize := vk.DeviceSize(size_of(vertices[0]) * len(vertices))
+	stagingBuf: vk.Buffer
+	stagingMem: vk.DeviceMemory
+	create_buffer(bufSize, {.TRANSFER_SRC}, {.HOST_VISIBLE, .HOST_COHERENT}, &stagingBuf, &stagingMem)
+
 	data: rawptr
-	vk.MapMemory(app.device, app.vertexBufferMemory, 0, vk.DeviceSize(bufSize), nil, &data)
-	mem.copy(data, &vertices[0], bufSize)
-	vk.UnmapMemory(app.device, app.vertexBufferMemory)
+	vk.MapMemory(app.device, stagingMem, 0, bufSize, nil, &data)
+	mem.copy(data, &vertices[0], int(bufSize))
+	vk.UnmapMemory(app.device, stagingMem)
+
+	create_buffer(bufSize, {.TRANSFER_DST, .VERTEX_BUFFER}, {.DEVICE_LOCAL}, &app.vertexBuffer, &app.vertexBufferMemory)
+	copy_buffer(stagingBuf, app.vertexBuffer, bufSize)
+
+	vk.DestroyBuffer(app.device, stagingBuf, nil)
+	vk.FreeMemory(app.device, stagingMem, nil)
+}
+
+create_index_buffer :: proc()
+{
+	bufSize := vk.DeviceSize(size_of(indices[0]) * u16(len(indices)))
+	
+	stagingBuf: vk.Buffer
+	stagingMem: vk.DeviceMemory
+	create_buffer(bufSize, {.TRANSFER_SRC}, {.HOST_VISIBLE, .HOST_COHERENT}, &stagingBuf, &stagingMem)
+
+	data: rawptr
+	vk.MapMemory(app.device, stagingMem, 0, bufSize, nil, &data)
+	mem.copy(data, &indices[0], int(bufSize))
+	vk.UnmapMemory(app.device, stagingMem)
+
+	create_buffer(bufSize, {.TRANSFER_DST, .INDEX_BUFFER}, {.DEVICE_LOCAL}, &app.indexBuffer, &app.indexBufferMemory)
+	copy_buffer(stagingBuf, app.indexBuffer, bufSize)
+	
+	vk.DestroyBuffer(app.device, stagingBuf, nil)
+	vk.FreeMemory(app.device, stagingMem, nil)
+}
+
+create_uniform_buffers :: proc()
+{
+	bufSize := vk.DeviceSize(size_of(UniformBufferObject))
+
+	resize(&app.uniformBuffers,       MAX_FRAMES_IN_FLIGHT)
+	resize(&app.uniformBuffersMemory, MAX_FRAMES_IN_FLIGHT)
+	resize(&app.uniformBuffersMapped, MAX_FRAMES_IN_FLIGHT)
+
+	for i in 0..<MAX_FRAMES_IN_FLIGHT
+	{
+		create_buffer(bufSize, {.UNIFORM_BUFFER}, {.HOST_VISIBLE, .HOST_COHERENT}, &app.uniformBuffers[i], &app.uniformBuffersMemory[i])
+		vk.MapMemory(app.device, app.uniformBuffersMemory[i], 0, bufSize, nil, &app.uniformBuffersMapped[i])
+	}
+}
+
+create_descriptor_pool :: proc()
+{
+	size: vk.DescriptorPoolSize
+	size.type = .UNIFORM_BUFFER
+	size.descriptorCount = u32(MAX_FRAMES_IN_FLIGHT)
+
+	poolInfo: vk.DescriptorPoolCreateInfo
+	poolInfo.sType = .DESCRIPTOR_POOL_CREATE_INFO
+	poolInfo.poolSizeCount = 1
+	poolInfo.pPoolSizes = &size
+	poolInfo.maxSets = u32(MAX_FRAMES_IN_FLIGHT)
+
+	if vk.CreateDescriptorPool(app.device, &poolInfo, nil, &app.descriptorPool) != .SUCCESS
+	{
+		fmt.panicf("Failed to create descriptor pool")
+	}
+}
+
+create_descriptor_sets :: proc()
+{	
+	layouts := make([]vk.DescriptorSetLayout, MAX_FRAMES_IN_FLIGHT)
+	
+	allocInfo: vk.DescriptorSetAllocateInfo
+	allocInfo.sType = .DESCRIPTOR_SET_ALLOCATE_INFO
+	allocInfo.descriptorPool = app.descriptorPool
+	allocInfo.descriptorSetCount = u32(MAX_FRAMES_IN_FLIGHT)
+	allocInfo.pSetLayouts = raw_data(layouts)
+}
+
+update_uniform_buffer :: proc(img: u32)
+{
+	ubo: UniformBufferObject
+	ubo.model = linalg.matrix4_rotate_f32(f32(glfw.GetTime()), {0, 1, 0})
+	ubo.view  = linalg.matrix4_look_at_f32({0, 0, -1}, {0, 0, 0}, {0, 0, 0}, true)
+	ubo.proj  = linalg.matrix4_perspective_f32(math.PI / 2, f32(app.swapExtent.width) / f32(app.swapExtent.height), 0.1, 100, true)
+	mem.copy(app.uniformBuffersMapped[img], &ubo, size_of(UniformBufferObject))
+}
+
+copy_buffer :: proc(src: vk.Buffer, dst: vk.Buffer, size: vk.DeviceSize)
+{
+	allocInfo: vk.CommandBufferAllocateInfo
+	allocInfo.sType = .COMMAND_BUFFER_ALLOCATE_INFO
+	allocInfo.level = .PRIMARY
+	allocInfo.commandPool = app.commandPool
+	allocInfo.commandBufferCount = 1
+
+	cmdBuf: vk.CommandBuffer
+	vk.AllocateCommandBuffers(app.device, &allocInfo, &cmdBuf)
+
+	beginInfo: vk.CommandBufferBeginInfo
+	beginInfo.sType = .COMMAND_BUFFER_BEGIN_INFO
+	beginInfo.flags = {.ONE_TIME_SUBMIT}
+	
+	vk.BeginCommandBuffer(cmdBuf, &beginInfo)
+		copyRegion: vk.BufferCopy
+		copyRegion.size = size
+		vk.CmdCopyBuffer(cmdBuf, src, dst, 1, &copyRegion)
+	vk.EndCommandBuffer(cmdBuf)
+
+	submitInfo: vk.SubmitInfo
+	submitInfo.sType = .SUBMIT_INFO
+	submitInfo.commandBufferCount = 1
+	submitInfo.pCommandBuffers = &cmdBuf
+	
+	vk.QueueSubmit(app.graphicsQueue, 1, &submitInfo, NULL_HANDLE)
+	vk.QueueWaitIdle(app.graphicsQueue)
+
+	vk.FreeCommandBuffers(app.device, app.commandPool, 1, &cmdBuf)
 }
 
 find_memory_type :: proc(filter: u32, flags: vk.MemoryPropertyFlags) -> u32
@@ -878,12 +1061,12 @@ create_sync_objects :: proc()
 	}
 }
 
-record_command_buffer :: proc(buffer: vk.CommandBuffer, index: u32)
+record_command_buffer :: proc(cmdBuf: vk.CommandBuffer, index: u32)
 {
 	beginInfo: vk.CommandBufferBeginInfo
 	beginInfo.sType = .COMMAND_BUFFER_BEGIN_INFO
 
-	if vk.BeginCommandBuffer(buffer, &beginInfo) != .SUCCESS
+	if vk.BeginCommandBuffer(cmdBuf, &beginInfo) != .SUCCESS
 	{
 		fmt.panicf("Failed to begin recording command buffer")
 	}
@@ -900,29 +1083,32 @@ record_command_buffer :: proc(buffer: vk.CommandBuffer, index: u32)
 	renderInfo.clearValueCount = 1
 	renderInfo.pClearValues = &clearValue
 
-	vk.CmdBeginRenderPass(buffer, &renderInfo, .INLINE)
-	vk.CmdBindPipeline(buffer, .GRAPHICS, app.graphicsPipeline)
+	vk.CmdBeginRenderPass(cmdBuf, &renderInfo, .INLINE)
+	vk.CmdBindPipeline(cmdBuf, .GRAPHICS, app.graphicsPipeline)
 
 	vertexBuffers: []vk.Buffer = {app.vertexBuffer}
 	deviceOffsets: []vk.DeviceSize = {0}
-	vk.CmdBindVertexBuffers(buffer, 0, 1, raw_data(vertexBuffers), raw_data(deviceOffsets))
+	vk.CmdBindVertexBuffers(cmdBuf, 0, 1, raw_data(vertexBuffers), raw_data(deviceOffsets))
+
+	vk.CmdBindIndexBuffer(cmdBuf, app.indexBuffer, 0, .UINT16)
 
 	viewport: vk.Viewport
 	viewport.width = f32(app.swapExtent.width)
 	viewport.height = f32(app.swapExtent.height)
 	viewport.minDepth = 0
 	viewport.maxDepth = 1
-	vk.CmdSetViewport(buffer, 0, 1, &viewport)
+	vk.CmdSetViewport(cmdBuf, 0, 1, &viewport)
 
 	scissor: vk.Rect2D
 	scissor.offset = {0, 0}
 	scissor.extent = app.swapExtent
-	vk.CmdSetScissor(buffer, 0, 1, &scissor)
+	vk.CmdSetScissor(cmdBuf, 0, 1, &scissor)
 
-	vk.CmdDraw(buffer, u32(len(vertices)), 1, 0, 0)
-	vk.CmdEndRenderPass(buffer)
+	// vk.CmdDraw(buffer, u32(len(vertices)), 1, 0, 0)
+	vk.CmdDrawIndexed(cmdBuf, u32(len(indices)), 1, 0, 0, 0)
+	vk.CmdEndRenderPass(cmdBuf)
 
-	if vk.EndCommandBuffer(buffer) != .SUCCESS
+	if vk.EndCommandBuffer(cmdBuf) != .SUCCESS
 	{
 		fmt.panicf("Failed to record command buffer")
 	}
