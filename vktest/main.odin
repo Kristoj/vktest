@@ -17,7 +17,7 @@ import "vendor:glfw"
 import vk "vendor:vulkan"
 
 ENABLE_VALIDATION_LAYERS :: true
-shouldPrintFps := true
+shouldPrintFps := false
 
 NULL_HANDLE :: 0
 MAX_FRAMES_IN_FLIGHT :: 2
@@ -56,6 +56,7 @@ Application :: struct
 	swapExtent:          vk.Extent2D,
 	descriptorPool:      vk.DescriptorPool,
 	descriptorSetLayout: vk.DescriptorSetLayout,
+	descriptorSets:      [dynamic]vk.DescriptorSet,
 	pipelineLayout:      vk.PipelineLayout,
 	renderPass:          vk.RenderPass,
 	graphicsPipeline:    vk.Pipeline,
@@ -284,6 +285,7 @@ cleanup :: proc()
 		vk.FreeMemory(app.device, app.uniformBuffersMemory[i], nil)
 	}
 	
+	vk.DestroyDescriptorPool(app.device, app.descriptorPool, nil)
 	vk.DestroyDescriptorSetLayout(app.device, app.descriptorSetLayout, nil)
 
 	vk.DestroyBuffer(app.device, app.vertexBuffer, nil)
@@ -957,19 +959,51 @@ create_descriptor_pool :: proc()
 create_descriptor_sets :: proc()
 {	
 	layouts := make([]vk.DescriptorSetLayout, MAX_FRAMES_IN_FLIGHT)
+	for i in 0..<MAX_FRAMES_IN_FLIGHT
+	{
+		layouts[i] = app.descriptorSetLayout
+	}
 	
 	allocInfo: vk.DescriptorSetAllocateInfo
 	allocInfo.sType = .DESCRIPTOR_SET_ALLOCATE_INFO
 	allocInfo.descriptorPool = app.descriptorPool
 	allocInfo.descriptorSetCount = u32(MAX_FRAMES_IN_FLIGHT)
 	allocInfo.pSetLayouts = raw_data(layouts)
+
+	resize(&app.descriptorSets, MAX_FRAMES_IN_FLIGHT)
+	if vk.AllocateDescriptorSets(app.device, &allocInfo, raw_data(app.descriptorSets)) != .SUCCESS
+	{
+		fmt.panicf("Failed to allocate descriptor sets")
+	}
+
+	for i in 0..<MAX_FRAMES_IN_FLIGHT
+	{
+		bufferInfo: vk.DescriptorBufferInfo
+		bufferInfo.buffer = app.uniformBuffers[i]
+		bufferInfo.offset = 0
+		bufferInfo.range = size_of(UniformBufferObject)
+
+		descWrite: vk.WriteDescriptorSet
+		descWrite.sType = .WRITE_DESCRIPTOR_SET
+		descWrite.dstSet = app.descriptorSets[i]
+		descWrite.dstBinding = 0
+		descWrite.dstArrayElement = 0
+		descWrite.descriptorType = .UNIFORM_BUFFER
+		descWrite.descriptorCount = 1
+		descWrite.pBufferInfo = &bufferInfo
+		vk.UpdateDescriptorSets(app.device, 1, &descWrite, 0, nil)
+	}
 }
+
+IDENTITY :: linalg.MATRIX4F32_IDENTITY
+rotate_mat    :: linalg.matrix4_rotate_f32
+translate_mat :: linalg.matrix4_translate_f32
 
 update_uniform_buffer :: proc(img: u32)
 {
 	ubo: UniformBufferObject
-	ubo.model = linalg.matrix4_rotate_f32(f32(glfw.GetTime()), {0, 1, 0})
-	ubo.view  = linalg.matrix4_look_at_f32({0, 0, -1}, {0, 0, 0}, {0, 0, 0}, true)
+	ubo.model = rotate_mat(f32(glfw.GetTime()), {0, 0, 1})
+	ubo.view  = linalg.matrix4_look_at_f32({0, 1, 1}, {0, 0, 0}, {0, 1, 0}, true)
 	ubo.proj  = linalg.matrix4_perspective_f32(math.PI / 2, f32(app.swapExtent.width) / f32(app.swapExtent.height), 0.1, 100, true)
 	mem.copy(app.uniformBuffersMapped[img], &ubo, size_of(UniformBufferObject))
 }
@@ -1091,6 +1125,8 @@ record_command_buffer :: proc(cmdBuf: vk.CommandBuffer, index: u32)
 	vk.CmdBindVertexBuffers(cmdBuf, 0, 1, raw_data(vertexBuffers), raw_data(deviceOffsets))
 
 	vk.CmdBindIndexBuffer(cmdBuf, app.indexBuffer, 0, .UINT16)
+
+	vk.CmdBindDescriptorSets(cmdBuf, .GRAPHICS, app.pipelineLayout, 0, 1, &app.descriptorSets[app.currentFrame], 0, nil)
 
 	viewport: vk.Viewport
 	viewport.width = f32(app.swapExtent.width)
