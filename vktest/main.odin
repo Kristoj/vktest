@@ -173,9 +173,12 @@ framebuffer_size_callback :: proc "c" (window: glfw.WindowHandle, width, height:
 
 main_loop :: proc()
 {
+	init_game()
+	
 	for !glfw.WindowShouldClose(app.window)
 	{
 		glfw.PollEvents()
+		update_input()
 		update_fps()
 		
 		// Update deltatime
@@ -183,6 +186,8 @@ main_loop :: proc()
 		app.dt = f32(curTime - app.lastFrameRenderTime)
 		app.lastFrameRenderTime = curTime
 		
+		move_camera()
+		reset_input()
 		
 		draw_frame()
 	}
@@ -741,7 +746,7 @@ create_graphics_pipeline :: proc()
 	rasterizer.rasterizerDiscardEnable = false
 	rasterizer.polygonMode = .FILL
 	rasterizer.lineWidth = 1
-	rasterizer.cullMode = {.BACK}
+	rasterizer.cullMode = {}
 	rasterizer.frontFace = .CLOCKWISE
 	rasterizer.depthBiasEnable = false
 
@@ -1003,7 +1008,12 @@ update_uniform_buffer :: proc(img: u32)
 {
 	ubo: UniformBufferObject
 	ubo.model = rotate_mat(f32(glfw.GetTime()), {0, 0, 1})
-	ubo.view  = linalg.matrix4_look_at_f32({0, 1, 1}, {0, 0, 0}, {0, 1, 0}, true)
+	
+	camPos := camera.position
+	// camPos.xy *= -1
+	
+	// ubo.view  = linalg.matrix4_look_at_f32(camPos, camPos + {0, 0, 1}, {0, 1, 0}, true)
+	ubo.view  = linalg.matrix4_look_at_f32(camPos, 0, {0, 1, 0}, true)
 	ubo.proj  = linalg.matrix4_perspective_f32(math.PI / 2, f32(app.swapExtent.width) / f32(app.swapExtent.height), 0.1, 100, true)
 	mem.copy(app.uniformBuffersMapped[img], &ubo, size_of(UniformBufferObject))
 }
@@ -1444,4 +1454,48 @@ key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods
  	{
  		glfw.SetWindowShouldClose(window, true)
  	}
+
+}
+
+// ------------------------------ EXTRA CODE ------------------------------------------------ \\
+
+Input :: struct
+{
+	move: Vec3,
+}
+input: Input
+
+init_game :: proc()
+{
+	camera.position = {0, 1, -1}
+	camera.speed = 5
+}
+
+update_input :: proc()
+{
+	if glfw.GetKey(app.window, glfw.KEY_W) != 0 do input.move.z += 1
+	if glfw.GetKey(app.window, glfw.KEY_S) != 0 do input.move.z -= 1
+	if glfw.GetKey(app.window, glfw.KEY_D) != 0 do input.move.x += 1
+	if glfw.GetKey(app.window, glfw.KEY_A) != 0 do input.move.x -= 1
+	
+	if glfw.GetKey(app.window, glfw.KEY_E) != 0 do input.move.y += 1
+	if glfw.GetKey(app.window, glfw.KEY_Q) != 0 do input.move.y -= 1
+}
+
+reset_input :: proc()
+{
+	input.move = 0
+}
+
+Camera :: struct
+{
+	position: Vec3,
+	speed:    f32,
+}
+camera: Camera 
+
+move_camera :: proc()
+{
+	fmt.println(camera.position)
+	camera.position += input.move * camera.speed * app.dt
 }
