@@ -15,6 +15,7 @@ import "base:runtime"
 
 import "vendor:glfw"
 import vk "vendor:vulkan"
+import stbi "vendor:stb/image"
 
 ENABLE_VALIDATION_LAYERS :: true
 shouldPrintFps := false
@@ -66,6 +67,8 @@ Application :: struct
 	vertexBufferMemory:  vk.DeviceMemory,
 	indexBuffer:         vk.Buffer,
 	indexBufferMemory:   vk.DeviceMemory,
+	textureImage:        vk.Image,
+	textureMemory:       vk.DeviceMemory,
 
 	uniformBuffers:       [dynamic]vk.Buffer,
 	uniformBuffersMemory: [dynamic]vk.DeviceMemory,
@@ -346,6 +349,7 @@ init_vulkan :: proc()
 	create_graphics_pipeline()
 	create_framebuffers()
 	create_command_pool()
+	create_texture_image()
 	create_vertex_buffer()
 	create_index_buffer()
 	create_uniform_buffers()
@@ -856,6 +860,52 @@ create_command_pool :: proc()
 	{
 		fmt.panicf("Failed to create commandpool")
 	}
+}
+
+create_texture_image :: proc()
+{
+	width, height, channels: c.int
+		// load           :: proc(filename: cstring, x, y, channels_in_file: ^c.int, desired_channels: c.int) -> [^]byte ---
+	image := stbi.load("res/tex/texture.jpg", &width, &height, &channels, 4)
+	if image == nil
+	{
+		fmt.panicf("Failed to load texture image")
+	}
+	defer stbi.image_free(image)
+	
+	imgSize := vk.DeviceSize(width * height * 4)
+	stagingBuf: vk.Buffer
+	stagingMem: vk.DeviceMemory
+
+	create_buffer(imgSize, {.TRANSFER_SRC}, {.HOST_VISIBLE, .HOST_COHERENT}, &stagingBuf, &stagingMem)
+
+	data: rawptr
+	vk.MapMemory(app.device, stagingMem, 0, imgSize, nil, &data)
+	mem.copy(data, image, int(imgSize))
+	vk.UnmapMemory(app.device, stagingMem)
+
+	imageInfo: vk.ImageCreateInfo
+	imageInfo.sType = .IMAGE_CREATE_INFO
+	imageInfo.imageType = .D2
+	imageInfo.extent.width =  u32(width)
+	imageInfo.extent.height = u32(height)
+	imageInfo.extent.depth = 1
+	imageInfo.mipLevels = 1
+	imageInfo.arrayLayers = 1
+	imageInfo.format = .R8G8B8A8_SRGB
+	imageInfo.tiling = .OPTIMAL
+	imageInfo.initialLayout = .UNDEFINED
+	imageInfo.usage = {.TRANSFER_DST, .SAMPLED}
+	imageInfo.sharingMode = .EXCLUSIVE
+	imageInfo.samples = {._1}
+
+	if vk.CreateImage(app.device, &imageInfo, nil, &app.textureImage) != .SUCCESS
+	{
+		fmt.panicf("Failed to create image")
+	}
+
+	// JATKA
+	// VkMemoryRequirements memRequirements;
 }
 
 create_buffer :: proc(size: vk.DeviceSize, usage: vk.BufferUsageFlags, props: vk.MemoryPropertyFlags,
@@ -1496,6 +1546,5 @@ camera: Camera
 
 move_camera :: proc()
 {
-	fmt.println(camera.position)
 	camera.position += input.move * camera.speed * app.dt
 }
