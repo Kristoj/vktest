@@ -18,16 +18,12 @@ import vk "vendor:vulkan"
 import stbi "vendor:stb/image"
 
 ENABLE_VALIDATION_LAYERS :: true
-shouldPrintFps := false
 
 NULL_HANDLE :: 0
 MAX_FRAMES_IN_FLIGHT :: 2
 
 winWidth  : c.int = 1600
 winHeight : c.int = 900
-
-lastFPSUpdateTime: f64
-fps: u32
 
 validationLayers: []cstring:
 {
@@ -286,6 +282,9 @@ draw_frame :: proc()
 cleanup :: proc()
 {
 	cleanup_swapchain()
+
+	vk.DestroyImage(app.device, app.textureImage, nil)
+	vk.FreeMemory(app.device, app.textureMemory, nil)
 
 	for i in 0..<MAX_FRAMES_IN_FLIGHT
 	{
@@ -862,6 +861,45 @@ create_command_pool :: proc()
 	}
 }
 
+create_image :: proc(width, height: u32, format: vk.Format, tiling: vk.ImageTiling,
+	usage: vk.ImageUsageFlags, props: vk.MemoryPropertyFlags, image:  ^vk.Image, imageMem: ^vk.DeviceMemory)
+{
+	
+	imageInfo: vk.ImageCreateInfo
+	imageInfo.sType = .IMAGE_CREATE_INFO
+	imageInfo.imageType = .D2
+	imageInfo.extent.width =  width
+	imageInfo.extent.height = height
+	imageInfo.extent.depth = 1
+	imageInfo.mipLevels = 1
+	imageInfo.arrayLayers = 1
+	imageInfo.format = format
+	imageInfo.tiling = tiling
+	imageInfo.initialLayout = .UNDEFINED
+	imageInfo.usage = usage
+	imageInfo.sharingMode = .EXCLUSIVE
+	imageInfo.samples = {._1}
+
+	if vk.CreateImage(app.device, &imageInfo, nil, image) != .SUCCESS
+	{
+		fmt.panicf("Failed to create image")
+	}
+
+	memReqs: vk.MemoryRequirements
+	vk.GetImageMemoryRequirements(app.device, image^, &memReqs)
+	allocInfo: vk.MemoryAllocateInfo
+	allocInfo.sType = .MEMORY_ALLOCATE_INFO
+	allocInfo.allocationSize = memReqs.size
+	allocInfo.memoryTypeIndex = find_memory_type(memReqs.memoryTypeBits, props)
+
+	if vk.AllocateMemory(app.device, &allocInfo, nil, imageMem) != .SUCCESS
+	{
+		fmt.panicf("Failed to allocate image memory")
+	}
+		
+	vk.BindImageMemory(app.device, image^, imageMem^, 0)
+}
+
 create_texture_image :: proc()
 {
 	width, height, channels: c.int
@@ -884,32 +922,71 @@ create_texture_image :: proc()
 	mem.copy(data, image, int(imgSize))
 	vk.UnmapMemory(app.device, stagingMem)
 
-	imageInfo: vk.ImageCreateInfo
-	imageInfo.sType = .IMAGE_CREATE_INFO
-	imageInfo.imageType = .D2
-	imageInfo.extent.width =  u32(width)
-	imageInfo.extent.height = u32(height)
-	imageInfo.extent.depth = 1
-	imageInfo.mipLevels = 1
-	imageInfo.arrayLayers = 1
-	imageInfo.format = .R8G8B8A8_SRGB
-	imageInfo.tiling = .OPTIMAL
-	imageInfo.initialLayout = .UNDEFINED
-	imageInfo.usage = {.TRANSFER_DST, .SAMPLED}
-	imageInfo.sharingMode = .EXCLUSIVE
-	imageInfo.samples = {._1}
+	create_image(u32(width), u32(height), vk.Format.R8G8B8A8_SRGB, vk.ImageTiling.OPTIMAL, 
+		{.TRANSFER_DST, .SAMPLED}, {.DEVICE_LOCAL}, &app.textureImage, &app.textureMemory)
+	transition_image_layout(app.textureImage, .R8G8B8A8_SRGB, .UNDEFINED, .TRANSFER_DST_OPTIMAL)
 
-	if vk.CreateImage(app.device, &imageInfo, nil, &app.textureImage) != .SUCCESS
+	vk.DestroyBuffer(app.device, stagingBuf, nil)
+	vk.FreeMemory(app.device, stagingMem, nil)
+}
+
+transition_image_layout :: proc(image: vk.Image, format: vk.Format, 
+oldLayout: vk.ImageLayout, newLayout: vk.ImageLayout)
+{
+	cmdBuf := begin_single_time_commands()
+	
+	barrier : vk.ImageMemoryBarrier
+	barrier.sType = .IMAGE_MEMORY_BARRIER
+	barrier.oldLayout = oldLayout
+	barrier.newLayout = newLayout
+	barrier.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+	barrier.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+	barrier.image = image
+	barrier.subresourceRange.aspectMask = {.COLOR}
+	barrier.subresourceRange.baseMipLevel = 0
+	barrier.subresourceRange.levelCount = 1
+	barrier.subresourceRange.baseArrayLayer = 0
+	barrier.subresourceRange.layerCount = 1
+	barrier.srcAccessMask = nil // TODO
+	barrier.dstAccessMask = nil // TODO
+
+	srcStage: vk.PipelineStageFlags
+	dstStage: vk.PipelineStageFlags
+	if oldLayout == .UNDEFINED && newLayout == .TRANSFER_DST_OPTIMAL
 	{
-		fmt.panicf("Failed to create image")
+		barrier.srcAccessMask = nil
+		barrier.dstAccessMask = {.TRANSFER_WRITE}
+
+		srcStage = {.TOP_OF_PIPE}
+		dstStage = {.TRANSFER}
+	}
+	else if oldLayout == .TRANSFER_DST_OPTIMAL && newLayout == .SHADER_READ_ONLY_OPTIMAL
+	{
+		barrier.srcAccessMask = {.TRANSFER_WRITE}
+		barrier.dstAccessMask = {.SHADER_READ}
+
+		srcStage = {.TRANSFER}
+		dstStage = {.FRAGMENT_SHADER}
+	}
+	else
+	{
+		fmt.panicf("Unsupported layout transition")
 	}
 
-	// JATKA
-	// VkMemoryRequirements memRequirements;
+	vk.CmdPipelineBarrier(
+		cmdBuf,
+		srcStage, dstStage,
+		nil,
+		0, nil,
+		0, nil,
+		1, &barrier
+	) 
+	
+	end_single_time_commands(cmdBuf)
 }
 
 create_buffer :: proc(size: vk.DeviceSize, usage: vk.BufferUsageFlags, props: vk.MemoryPropertyFlags,
-				 buf: ^vk.Buffer, bufMem: ^vk.DeviceMemory)
+buf: ^vk.Buffer, bufMem: ^vk.DeviceMemory)
 {
 	
 	bufferInfo: vk.BufferCreateInfo
@@ -1068,8 +1145,9 @@ update_uniform_buffer :: proc(img: u32)
 	mem.copy(app.uniformBuffersMapped[img], &ubo, size_of(UniformBufferObject))
 }
 
-copy_buffer :: proc(src: vk.Buffer, dst: vk.Buffer, size: vk.DeviceSize)
+begin_single_time_commands :: proc() -> vk.CommandBuffer
 {
+	
 	allocInfo: vk.CommandBufferAllocateInfo
 	allocInfo.sType = .COMMAND_BUFFER_ALLOCATE_INFO
 	allocInfo.level = .PRIMARY
@@ -1084,9 +1162,13 @@ copy_buffer :: proc(src: vk.Buffer, dst: vk.Buffer, size: vk.DeviceSize)
 	beginInfo.flags = {.ONE_TIME_SUBMIT}
 	
 	vk.BeginCommandBuffer(cmdBuf, &beginInfo)
-		copyRegion: vk.BufferCopy
-		copyRegion.size = size
-		vk.CmdCopyBuffer(cmdBuf, src, dst, 1, &copyRegion)
+
+	return cmdBuf
+}
+
+end_single_time_commands :: proc(cmdBuf: vk.CommandBuffer)
+{
+	cmdBuf := cmdBuf
 	vk.EndCommandBuffer(cmdBuf)
 
 	submitInfo: vk.SubmitInfo
@@ -1098,6 +1180,42 @@ copy_buffer :: proc(src: vk.Buffer, dst: vk.Buffer, size: vk.DeviceSize)
 	vk.QueueWaitIdle(app.graphicsQueue)
 
 	vk.FreeCommandBuffers(app.device, app.commandPool, 1, &cmdBuf)
+}
+
+copy_buffer :: proc(src: vk.Buffer, dst: vk.Buffer, size: vk.DeviceSize)
+{
+	cmdBuf := begin_single_time_commands()
+	
+	region: vk.BufferCopy
+	region.size = size
+	vk.CmdCopyBuffer(cmdBuf, src, dst, 1, &region)
+	
+	end_single_time_commands(cmdBuf)
+}
+
+copy_buffer_to_image :: proc(buffer: vk.Buffer, image: vk.Image, width, height: u32)
+{
+	cmdBuf := begin_single_time_commands()
+
+	region: vk.BufferImageCopy
+	region.imageSubresource.aspectMask = {.COLOR}
+	region.imageSubresource.layerCount = 1
+	region.imageExtent = {
+		width = width,
+		height = height,
+		depth = 1
+	}
+
+	vk.CmdCopyBufferToImage(
+		cmdBuf,
+		buffer,
+		image,
+		.TRANSFER_DST_OPTIMAL,
+		1,
+		&region
+	)
+	
+	end_single_time_commands(cmdBuf)
 }
 
 find_memory_type :: proc(filter: u32, flags: vk.MemoryPropertyFlags) -> u32
@@ -1508,6 +1626,10 @@ key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods
 }
 
 // ------------------------------ EXTRA CODE ------------------------------------------------ \\
+shouldPrintFps := false
+lastFPSUpdateTime: f64
+fps: u32
+
 
 Input :: struct
 {
