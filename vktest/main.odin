@@ -65,7 +65,12 @@ Application :: struct
 	indexBufferMemory:   vk.DeviceMemory,
 	textureImage:        vk.Image,
 	textureMemory:       vk.DeviceMemory,
-
+	textureImageView:    vk.ImageView,
+	textureSampler:      vk.Sampler,
+	depthImage:          vk.Image,
+	depthImageMemory:    vk.DeviceMemory,
+	depthImageView:      vk.ImageView,
+	
 	uniformBuffers:       [dynamic]vk.Buffer,
 	uniformBuffersMemory: [dynamic]vk.DeviceMemory,
 	uniformBuffersMapped: [dynamic]rawptr,
@@ -108,19 +113,26 @@ Vec3 :: linalg.Vector3f32
 
 Vertex :: struct
 {
-	pos: Vec2,
-	col: Vec3,
+	pos:      Vec3,
+	col:      Vec3,
+	texCoord: Vec2,
 }
 
 vertices: []Vertex = {
-	Vertex{{-0.5, -0.5}, {1, 0, 0}},
-	Vertex{{ 0.5, -0.5}, {0, 1, 0}},
-	Vertex{{ 0.5,  0.5}, {0, 0, 1}},
-	Vertex{{-0.5,  0.5}, {1, 1, 1}},
+	Vertex{{-0.5, -0.5,  0.0}, {1, 0, 0}, {1, 0}},
+	Vertex{{ 0.5, -0.5,  0.0}, {0, 1, 0}, {0, 0}},
+	Vertex{{ 0.5,  0.5,  0.0}, {0, 0, 1}, {0, 1}},
+	Vertex{{-0.5,  0.5,  0.0}, {1, 1, 1}, {1, 1}},
+	
+	Vertex{{-0.5, -0.5, -0.5}, {1, 0, 0}, {1, 0}},
+	Vertex{{ 0.5, -0.5, -0.5}, {0, 1, 0}, {0, 0}},
+	Vertex{{ 0.5,  0.5, -0.5}, {0, 0, 1}, {0, 1}},
+	Vertex{{-0.5,  0.5, -0.5}, {1, 1, 1}, {1, 1}},
 }
 
 indices: []u16 = {
-	0, 1, 2, 2, 3, 0
+	0, 1, 2, 2, 3, 0,
+	4, 5, 6, 6, 7, 4,
 }
 
 get_binding_description :: proc() -> vk.VertexInputBindingDescription
@@ -134,16 +146,23 @@ get_binding_description :: proc() -> vk.VertexInputBindingDescription
 
 get_attribute_description :: proc() -> []vk.VertexInputAttributeDescription
 {
-	desc := make([]vk.VertexInputAttributeDescription, 2)
+	desc := make([]vk.VertexInputAttributeDescription, 3)
+	
 	desc[0].binding = 0
 	desc[0].location = 0
-	desc[0].format = .R32G32_SFLOAT
+	desc[0].format = .R32G32B32_SFLOAT
 	desc[0].offset = u32(offset_of_by_string(Vertex, "pos"))
 
 	desc[1].binding = 0
 	desc[1].location = 1
 	desc[1].format = .R32G32B32_SFLOAT
 	desc[1].offset = u32(offset_of_by_string(Vertex, "col"))
+
+	desc[2].binding = 0
+	desc[2].location = 2
+	desc[2].format = .R32G32_SFLOAT
+	desc[2].offset = u32(offset_of_by_string(Vertex, "texCoord"))
+	
 	return desc
 }
 
@@ -283,6 +302,8 @@ cleanup :: proc()
 {
 	cleanup_swapchain()
 
+	vk.DestroySampler(app.device, app.textureSampler, nil)
+	vk.DestroyImageView(app.device, app.textureImageView, nil)
 	vk.DestroyImage(app.device, app.textureImage, nil)
 	vk.FreeMemory(app.device, app.textureMemory, nil)
 
@@ -323,7 +344,6 @@ cleanup :: proc()
 	vk.DestroySurfaceKHR(app.instance, app.surface, nil)
 	vk.DestroyInstance(app.instance, nil)
 
-	
 	glfw.DestroyWindow(app.window)
 	glfw.Terminate()
 }
@@ -346,9 +366,12 @@ init_vulkan :: proc()
 	create_render_pass()
 	create_descriptor_set_layout()
 	create_graphics_pipeline()
-	create_framebuffers()
 	create_command_pool()
+	create_depth_resources()
+	create_framebuffers()
 	create_texture_image()
+	create_texture_image_view()
+	create_texture_sampler()
 	create_vertex_buffer()
 	create_index_buffer()
 	create_uniform_buffers()
@@ -456,6 +479,7 @@ create_logical_device :: proc()
 	}
 
 	features: vk.PhysicalDeviceFeatures
+	features.samplerAnisotropy = true
 
 	createInfo: vk.DeviceCreateInfo
 	createInfo.sType = .DEVICE_CREATE_INFO
@@ -601,27 +625,7 @@ create_image_views :: proc()
 
 	for i in 0..<len(app.swapImages)
 	{
-		createInfo: vk.ImageViewCreateInfo
-		createInfo.sType = .IMAGE_VIEW_CREATE_INFO
-		createInfo.image = app.swapImages[i]
-		createInfo.viewType = .D2
-		createInfo.format = app.swapImageFormat
-		
-		createInfo.components.r = vk.ComponentSwizzle.IDENTITY
-		createInfo.components.g = vk.ComponentSwizzle.IDENTITY
-		createInfo.components.b = vk.ComponentSwizzle.IDENTITY
-		createInfo.components.a = vk.ComponentSwizzle.IDENTITY
-
-		createInfo.subresourceRange.aspectMask = {.COLOR}
-		createInfo.subresourceRange.baseMipLevel = 0
-		createInfo.subresourceRange.levelCount = 1	
-		createInfo.subresourceRange.baseArrayLayer = 0
-		createInfo.subresourceRange.layerCount = 1
-		
-		if vk.CreateImageView(app.device, &createInfo, nil, &app.swapImageViews[i]) != .SUCCESS
-		{
-			fmt.panicf("Failed to create image view")
-		}
+		app.swapImageViews[i] = create_image_view(app.swapImages[i], app.swapImageFormat, {.COLOR})
 	}
 
 }
@@ -650,23 +654,40 @@ create_render_pass :: proc()
 	colorAttachmentRef.attachment = 0
 	colorAttachmentRef.layout = .COLOR_ATTACHMENT_OPTIMAL
 
+	depthAttachment: vk.AttachmentDescription
+	depthAttachment.format = find_depth_format()
+	depthAttachment.samples = {._1}
+	depthAttachment.loadOp = .CLEAR
+	depthAttachment.storeOp = .DONT_CARE
+	depthAttachment.stencilLoadOp = .DONT_CARE
+	depthAttachment.stencilStoreOp = .DONT_CARE
+	depthAttachment.initialLayout = .UNDEFINED
+	depthAttachment.finalLayout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+
+	depthRef: vk.AttachmentReference
+	depthRef.attachment = 1
+	depthRef.layout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+
 	subpass: vk.SubpassDescription
 	subpass.pipelineBindPoint = .GRAPHICS
 	subpass.colorAttachmentCount = 1
 	subpass.pColorAttachments = &colorAttachmentRef
+	subpass.pDepthStencilAttachment = &depthRef
 	
 	dep: vk.SubpassDependency
 	dep.srcSubpass = vk.SUBPASS_EXTERNAL
 	dep.dstSubpass = 0
-	dep.srcStageMask = {.COLOR_ATTACHMENT_OUTPUT}
-	dep.srcAccessMask = nil // FIX: This was normally nil
-	dep.dstStageMask = {.COLOR_ATTACHMENT_OUTPUT}
-	dep.dstAccessMask = {.COLOR_ATTACHMENT_WRITE}
+	dep.srcStageMask = {.COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS}
+	dep.srcAccessMask = nil 
+	dep.dstStageMask = {.COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS}
+	dep.dstAccessMask = {.COLOR_ATTACHMENT_WRITE, .DEPTH_STENCIL_ATTACHMENT_WRITE}
 
+	attachments := []vk.AttachmentDescription {colorAttachment, depthAttachment}
+	
 	renderPassInfo: vk.RenderPassCreateInfo
 	renderPassInfo.sType = .RENDER_PASS_CREATE_INFO
-	renderPassInfo.attachmentCount = 1
-	renderPassInfo.pAttachments = &colorAttachment
+	renderPassInfo.attachmentCount = u32(len(attachments))
+	renderPassInfo.pAttachments = raw_data(attachments)
 	renderPassInfo.subpassCount = 1
 	renderPassInfo.pSubpasses = &subpass
 	renderPassInfo.dependencyCount = 1
@@ -680,20 +701,29 @@ create_render_pass :: proc()
 
 create_descriptor_set_layout :: proc()
 {
-	binding: vk.DescriptorSetLayoutBinding
-	binding.binding = 0
-	binding.descriptorType = .UNIFORM_BUFFER
-	binding.descriptorCount = 1
-	binding.stageFlags = {.VERTEX}
+	vertexBinding: vk.DescriptorSetLayoutBinding
+	vertexBinding.binding = 0
+	vertexBinding.descriptorCount = 1
+	vertexBinding.descriptorType = .UNIFORM_BUFFER
+	vertexBinding.stageFlags = {.VERTEX}
 
+	
+	samplerBinding: vk.DescriptorSetLayoutBinding
+	samplerBinding.binding = 1
+	samplerBinding.descriptorCount = 1
+	samplerBinding.descriptorType = .COMBINED_IMAGE_SAMPLER
+	samplerBinding.stageFlags = {.FRAGMENT}
+
+	bindings := []vk.DescriptorSetLayoutBinding {vertexBinding, samplerBinding}
 	layoutInfo: vk.DescriptorSetLayoutCreateInfo
 	layoutInfo.sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO
-	layoutInfo.bindingCount = 1
-	layoutInfo.pBindings = &binding
+	layoutInfo.bindingCount = u32(len(bindings))
+	layoutInfo.pBindings = raw_data(bindings)
 
-	if vk.CreateDescriptorSetLayout(app.device, &layoutInfo, nil, &app.descriptorSetLayout) != .SUCCESS
+	result := vk.CreateDescriptorSetLayout(app.device, &layoutInfo, nil, &app.descriptorSetLayout) 
+	if result != .SUCCESS
 	{
-		fmt.panicf("Failed to create descriptor set layout")
+		fmt.panicf("Failed to create descriptor set layout %v", result)
 	}
 }
 
@@ -773,6 +803,14 @@ create_graphics_pipeline :: proc()
 	colorBlendInfo.attachmentCount = 1
 	colorBlendInfo.pAttachments = &colorBlendAttachment
 
+	depthStencil: vk.PipelineDepthStencilStateCreateInfo
+	depthStencil.sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO
+	depthStencil.depthTestEnable = true
+	depthStencil.depthWriteEnable = true
+	depthStencil.depthCompareOp = .LESS
+	depthStencil.depthBoundsTestEnable = false
+	depthStencil.stencilTestEnable = false
+
 	pipeLayoutInfo: vk.PipelineLayoutCreateInfo
 	pipeLayoutInfo.sType = .PIPELINE_LAYOUT_CREATE_INFO
 	pipeLayoutInfo.setLayoutCount = 1
@@ -812,6 +850,7 @@ create_graphics_pipeline :: proc()
 	pipelineInfo.subpass = 0
 	pipelineInfo.basePipelineHandle = NULL_HANDLE
 	pipelineInfo.basePipelineIndex = -1
+	pipelineInfo.pDepthStencilState = &depthStencil
 
 	if vk.CreateGraphicsPipelines(app.device, NULL_HANDLE, 1, &pipelineInfo, nil, &app.graphicsPipeline) != .SUCCESS
 	{
@@ -828,12 +867,12 @@ create_framebuffers :: proc()
 	
 	for view, i in app.swapImageViews
 	{
-		attachments: []vk.ImageView = {view}
+		attachments: []vk.ImageView = {view, app.depthImageView}
 
 		framebufferInfo: vk.FramebufferCreateInfo
 		framebufferInfo.sType = .FRAMEBUFFER_CREATE_INFO
 		framebufferInfo.renderPass = app.renderPass
-		framebufferInfo.attachmentCount = 1
+		framebufferInfo.attachmentCount = u32(len(attachments))
 		framebufferInfo.pAttachments = raw_data(attachments)
 		framebufferInfo.width = app.swapExtent.width
 		framebufferInfo.height = app.swapExtent.height
@@ -859,6 +898,50 @@ create_command_pool :: proc()
 	{
 		fmt.panicf("Failed to create commandpool")
 	}
+}
+
+find_supported_format :: proc(candidates: []vk.Format, tiling : vk.ImageTiling, features: vk.FormatFeatureFlags) -> vk.Format
+{
+	props: vk.FormatProperties
+	for format in candidates
+	{
+		vk.GetPhysicalDeviceFormatProperties(app.physicalDevice, format, &props)
+		if tiling == .LINEAR && (props.linearTilingFeatures & features) == features
+		{
+			return format
+		}
+		else if tiling == .OPTIMAL && (props.optimalTilingFeatures & features) == features
+		{
+			return format
+		}
+	}
+
+	fmt.panicf("Failed to find supported format")
+}
+
+has_stencil_component :: proc(format: vk.Format) -> bool
+{
+	return format == .D32_SFLOAT_S8_UINT || format == .D24_UNORM_S8_UINT
+}
+
+find_depth_format :: proc() -> vk.Format
+{
+	return find_supported_format(
+		{.D32_SFLOAT, .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT},
+		.OPTIMAL,
+		{.DEPTH_STENCIL_ATTACHMENT}
+	)
+}
+
+create_depth_resources :: proc()
+{
+	depthFormat := find_depth_format()
+	
+	create_image(app.swapExtent.width, app.swapExtent.height, depthFormat, .OPTIMAL, 
+		{.DEPTH_STENCIL_ATTACHMENT}, {.DEVICE_LOCAL}, &app.depthImage, &app.depthImageMemory) 
+	depthImageView := create_image_view(app.depthImage, depthFormat, {.DEPTH})
+	
+	transition_image_layout(app.depthImage, depthFormat, .UNDEFINED, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 }
 
 create_image :: proc(width, height: u32, format: vk.Format, tiling: vk.ImageTiling,
@@ -924,10 +1007,64 @@ create_texture_image :: proc()
 
 	create_image(u32(width), u32(height), vk.Format.R8G8B8A8_SRGB, vk.ImageTiling.OPTIMAL, 
 		{.TRANSFER_DST, .SAMPLED}, {.DEVICE_LOCAL}, &app.textureImage, &app.textureMemory)
+	
 	transition_image_layout(app.textureImage, .R8G8B8A8_SRGB, .UNDEFINED, .TRANSFER_DST_OPTIMAL)
+		copy_buffer_to_image(stagingBuf, app.textureImage, u32(width), u32(height))
+	transition_image_layout(app.textureImage, .R8G8B8A8_SRGB, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL)
 
 	vk.DestroyBuffer(app.device, stagingBuf, nil)
 	vk.FreeMemory(app.device, stagingMem, nil)
+}
+
+create_image_view :: proc(image: vk.Image, format: vk.Format, aspectFlags: vk.ImageAspectFlags) -> vk.ImageView
+{
+	viewInfo: vk.ImageViewCreateInfo
+	viewInfo.sType = .IMAGE_VIEW_CREATE_INFO
+	viewInfo.image = image
+	viewInfo.viewType = .D2
+	viewInfo.format = format
+	viewInfo.subresourceRange.aspectMask = aspectFlags
+	viewInfo.subresourceRange.levelCount = 1
+	viewInfo.subresourceRange.layerCount = 1
+	
+	view: vk.ImageView
+	if vk.CreateImageView(app.device, &viewInfo, nil, &view) != .SUCCESS
+	{
+		fmt.panicf("Failed to create texture image view")
+	}
+
+	return view
+}
+
+create_texture_image_view :: proc()
+{
+	app.textureImageView = create_image_view(app.textureImage, .R8G8B8A8_SRGB, {.COLOR})
+}
+
+create_texture_sampler :: proc()
+{
+	props: vk.PhysicalDeviceProperties
+	vk.GetPhysicalDeviceProperties(app.physicalDevice, &props)
+	
+	samplerInfo: vk.SamplerCreateInfo
+	samplerInfo.sType = .SAMPLER_CREATE_INFO
+	samplerInfo.minFilter = .NEAREST
+	samplerInfo.magFilter = .NEAREST
+	samplerInfo.addressModeU = .REPEAT
+	samplerInfo.addressModeV = .REPEAT
+	samplerInfo.addressModeW = .REPEAT
+	samplerInfo.anisotropyEnable = true
+	samplerInfo.maxAnisotropy = props.limits.maxSamplerAnisotropy
+	samplerInfo.borderColor = .INT_OPAQUE_BLACK
+	samplerInfo.unnormalizedCoordinates = false
+	samplerInfo.compareEnable = false
+	samplerInfo.compareOp = .ALWAYS
+	samplerInfo.mipmapMode = .LINEAR
+
+	if vk.CreateSampler(app.device, &samplerInfo, nil, &app.textureSampler) != .SUCCESS
+	{
+		fmt.panicf("Failed to create texture sampler")
+	}
 }
 
 transition_image_layout :: proc(image: vk.Image, format: vk.Format, 
@@ -952,6 +1089,7 @@ oldLayout: vk.ImageLayout, newLayout: vk.ImageLayout)
 
 	srcStage: vk.PipelineStageFlags
 	dstStage: vk.PipelineStageFlags
+	
 	if oldLayout == .UNDEFINED && newLayout == .TRANSFER_DST_OPTIMAL
 	{
 		barrier.srcAccessMask = nil
@@ -968,9 +1106,31 @@ oldLayout: vk.ImageLayout, newLayout: vk.ImageLayout)
 		srcStage = {.TRANSFER}
 		dstStage = {.FRAGMENT_SHADER}
 	}
+	else if oldLayout == .UNDEFINED && newLayout == .DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+	{
+		barrier.srcAccessMask = nil
+		barrier.dstAccessMask = {.DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE}
+
+		srcStage = {.TOP_OF_PIPE}
+		dstStage = {.EARLY_FRAGMENT_TESTS}
+	}
 	else
 	{
 		fmt.panicf("Unsupported layout transition")
+	}
+
+	if newLayout == .DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+	{
+		barrier.subresourceRange.aspectMask = {.DEPTH}
+
+		if has_stencil_component(format)
+		{
+			barrier.subresourceRange.aspectMask += {.STENCIL}
+		}
+	}
+	else
+	{
+		barrier.subresourceRange.aspectMask = {.COLOR}
 	}
 
 	vk.CmdPipelineBarrier(
@@ -1072,14 +1232,18 @@ create_uniform_buffers :: proc()
 
 create_descriptor_pool :: proc()
 {
-	size: vk.DescriptorPoolSize
-	size.type = .UNIFORM_BUFFER
-	size.descriptorCount = u32(MAX_FRAMES_IN_FLIGHT)
+	poolSizes := make([]vk.DescriptorPoolSize, 2)
+	defer delete(poolSizes)
+	
+	poolSizes[0].type = .UNIFORM_BUFFER
+	poolSizes[0].descriptorCount = u32(MAX_FRAMES_IN_FLIGHT)
+	poolSizes[1].type = .COMBINED_IMAGE_SAMPLER
+	poolSizes[1].descriptorCount = u32(MAX_FRAMES_IN_FLIGHT)
 
 	poolInfo: vk.DescriptorPoolCreateInfo
 	poolInfo.sType = .DESCRIPTOR_POOL_CREATE_INFO
-	poolInfo.poolSizeCount = 1
-	poolInfo.pPoolSizes = &size
+	poolInfo.poolSizeCount = u32(len(poolSizes))
+	poolInfo.pPoolSizes = raw_data(poolSizes)
 	poolInfo.maxSets = u32(MAX_FRAMES_IN_FLIGHT)
 
 	if vk.CreateDescriptorPool(app.device, &poolInfo, nil, &app.descriptorPool) != .SUCCESS
@@ -1110,26 +1274,37 @@ create_descriptor_sets :: proc()
 
 	for i in 0..<MAX_FRAMES_IN_FLIGHT
 	{
+		descWrites := make([]vk.WriteDescriptorSet, 2)
+		
 		bufferInfo: vk.DescriptorBufferInfo
 		bufferInfo.buffer = app.uniformBuffers[i]
 		bufferInfo.offset = 0
 		bufferInfo.range = size_of(UniformBufferObject)
 
-		descWrite: vk.WriteDescriptorSet
-		descWrite.sType = .WRITE_DESCRIPTOR_SET
-		descWrite.dstSet = app.descriptorSets[i]
-		descWrite.dstBinding = 0
-		descWrite.dstArrayElement = 0
-		descWrite.descriptorType = .UNIFORM_BUFFER
-		descWrite.descriptorCount = 1
-		descWrite.pBufferInfo = &bufferInfo
-		vk.UpdateDescriptorSets(app.device, 1, &descWrite, 0, nil)
+		descWrites[0].sType = .WRITE_DESCRIPTOR_SET
+		descWrites[0].dstSet = app.descriptorSets[i]
+		descWrites[0].dstBinding = 0
+		descWrites[0].dstArrayElement = 0
+		descWrites[0].descriptorType = .UNIFORM_BUFFER
+		descWrites[0].descriptorCount = 1
+		descWrites[0].pBufferInfo = &bufferInfo
+
+		imageInfo: vk.DescriptorImageInfo
+		imageInfo.imageLayout = .SHADER_READ_ONLY_OPTIMAL
+		imageInfo.imageView = app.textureImageView
+		imageInfo.sampler = app.textureSampler
+
+		descWrites[1].sType = .WRITE_DESCRIPTOR_SET
+		descWrites[1].dstSet = app.descriptorSets[i]
+		descWrites[1].dstBinding = 1
+		descWrites[1].dstArrayElement = 0
+		descWrites[1].descriptorType = .COMBINED_IMAGE_SAMPLER
+		descWrites[1].descriptorCount = 1
+		descWrites[1].pImageInfo = &imageInfo
+		
+		vk.UpdateDescriptorSets(app.device, u32(len(descWrites)), raw_data(descWrites), 0, nil)
 	}
 }
-
-IDENTITY :: linalg.MATRIX4F32_IDENTITY
-rotate_mat    :: linalg.matrix4_rotate_f32
-translate_mat :: linalg.matrix4_translate_f32
 
 update_uniform_buffer :: proc(img: u32)
 {
@@ -1291,9 +1466,13 @@ record_command_buffer :: proc(cmdBuf: vk.CommandBuffer, index: u32)
 	renderInfo.renderArea.extent = app.swapExtent
 
 	col: vk.ClearColorValue = {float32 = [4]f32{0, 0, 0, 1}}
-	clearValue: vk.ClearValue = {color = col}
-	renderInfo.clearValueCount = 1
-	renderInfo.pClearValues = &clearValue
+	depthValue: vk.ClearDepthStencilValue = {depth = 1, stencil = 0}
+	clearValues: []vk.ClearValue = {
+		{color = col},
+		{depthStencil = depthValue}
+	}
+	renderInfo.clearValueCount = u32(len(clearValues))
+	renderInfo.pClearValues = raw_data(clearValues)
 
 	vk.CmdBeginRenderPass(cmdBuf, &renderInfo, .INLINE)
 	vk.CmdBindPipeline(cmdBuf, .GRAPHICS, app.graphicsPipeline)
@@ -1368,7 +1547,8 @@ is_device_suitable :: proc(device: vk.PhysicalDevice) -> bool
 			isSwapchainAdequate = true
 		}
 	}
-	return is_family_indices_complete(&indices) && extSupported && isSwapchainAdequate
+	
+	return is_family_indices_complete(&indices) && extSupported && isSwapchainAdequate && features.samplerAnisotropy
 }
 
 check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool
@@ -1608,6 +1788,10 @@ get_required_extensions :: proc() -> []cstring
 
 main :: proc()
 {
+	allocator := mem.Tracking_Allocator{}
+	mem.tracking_allocator_init(&allocator, context.allocator)
+	context.allocator = mem.tracking_allocator(&allocator)
+	
 	fmt.println("")
 	context.logger = log.create_console_logger(log.Level.Warning)
 	init_window()
@@ -1626,6 +1810,10 @@ key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods
 }
 
 // ------------------------------ EXTRA CODE ------------------------------------------------ \\
+IDENTITY :: linalg.MATRIX4F32_IDENTITY
+rotate_mat    :: linalg.matrix4_rotate_f32
+translate_mat :: linalg.matrix4_translate_f32
+
 shouldPrintFps := false
 lastFPSUpdateTime: f64
 fps: u32
@@ -1639,7 +1827,7 @@ input: Input
 
 init_game :: proc()
 {
-	camera.position = {0, 1, -1}
+	camera.position = {0, 1, 1}
 	camera.speed = 5
 }
 
