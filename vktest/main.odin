@@ -16,6 +16,7 @@ import "base:runtime"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 import stbi "vendor:stb/image"
+import "vendor:cgltf"
 
 ENABLE_VALIDATION_LAYERS :: true
 
@@ -70,6 +71,9 @@ Application :: struct
 	depthImage:          vk.Image,
 	depthImageMemory:    vk.DeviceMemory,
 	depthImageView:      vk.ImageView,
+
+	vertices: []Vertex,
+	indices:  []u16,
 	
 	uniformBuffers:       [dynamic]vk.Buffer,
 	uniformBuffersMemory: [dynamic]vk.DeviceMemory,
@@ -306,11 +310,16 @@ cleanup :: proc()
 	vk.DestroyImageView(app.device, app.textureImageView, nil)
 	vk.DestroyImage(app.device, app.textureImage, nil)
 	vk.FreeMemory(app.device, app.textureMemory, nil)
+	
+	vk.DestroyImageView(app.device, app.depthImageView, nil)
+	vk.DestroyImage(app.device, app.depthImage, nil)
+	vk.FreeMemory(app.device, app.depthImageMemory, nil)
 
 	for i in 0..<MAX_FRAMES_IN_FLIGHT
 	{
 		vk.DestroyBuffer(app.device, app.uniformBuffers[i], nil)
 		vk.FreeMemory(app.device, app.uniformBuffersMemory[i], nil)
+
 	}
 	
 	vk.DestroyDescriptorPool(app.device, app.descriptorPool, nil)
@@ -372,6 +381,7 @@ init_vulkan :: proc()
 	create_texture_image()
 	create_texture_image_view()
 	create_texture_sampler()
+	load_model("res/models/monkey.glb")
 	create_vertex_buffer()
 	create_index_buffer()
 	create_uniform_buffers()
@@ -939,7 +949,7 @@ create_depth_resources :: proc()
 	
 	create_image(app.swapExtent.width, app.swapExtent.height, depthFormat, .OPTIMAL, 
 		{.DEPTH_STENCIL_ATTACHMENT}, {.DEVICE_LOCAL}, &app.depthImage, &app.depthImageMemory) 
-	depthImageView := create_image_view(app.depthImage, depthFormat, {.DEPTH})
+	app.depthImageView = create_image_view(app.depthImage, depthFormat, {.DEPTH})
 	
 	transition_image_layout(app.depthImage, depthFormat, .UNDEFINED, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 }
@@ -1808,6 +1818,54 @@ key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods
  	}
 
 }
+
+// ------------------------------ MODEL LOADING ----------------------------------------------\\
+
+load_model :: proc(name: cstring)
+{
+	data, result := cgltf.parse_file({}, name)
+	if result != .success  
+	{
+		fmt.panicf("Failed to load model file: %s", name)
+	}
+
+	result = cgltf.load_buffers({}, data, name)
+	if result != .success
+	{
+		fmt.panicf("Failed to load model %s buffers with error: %v", name, result)
+	}
+	defer cgltf.free(data)
+	
+	// Load positions
+	pos: []Vec3 = parse_mesh_data(&data.accessors[0], Vec3)
+	fmt.println("len", len(pos))
+	for p in pos
+	{
+		fmt.println(p)
+	}
+}
+
+parse_mesh_data :: proc(acc: ^cgltf.accessor, $T: typeid) -> []T
+{
+	data := make([]T, acc.count)
+	size := acc.count * acc.stride
+	uri  := &acc.buffer_view.data
+	fmt.println(acc.count)
+	fmt.println(acc.stride)
+	fmt.println(acc.type)
+	
+	for i in 0..<acc.count	
+	{
+		src := uintptr(uri) + uintptr(acc.offset) + uintptr(acc.stride * i)
+		
+		mem.copy(&data[i], rawptr(src), int(acc.stride))
+	}
+	
+	return data
+}
+
+
+// ------------------------------               ----------------------------------------------\\
 
 // ------------------------------ EXTRA CODE ------------------------------------------------ \\
 IDENTITY :: linalg.MATRIX4F32_IDENTITY
