@@ -122,22 +122,22 @@ Vertex :: struct
 	texCoord: Vec2,
 }
 
-vertices: []Vertex = {
-	Vertex{{-0.5, -0.5,  0.0}, {1, 0, 0}, {1, 0}},
-	Vertex{{ 0.5, -0.5,  0.0}, {0, 1, 0}, {0, 0}},
-	Vertex{{ 0.5,  0.5,  0.0}, {0, 0, 1}, {0, 1}},
-	Vertex{{-0.5,  0.5,  0.0}, {1, 1, 1}, {1, 1}},
+// vertices: []Vertex = {
+// 	Vertex{{-0.5, -0.5,  0.0}, {1, 0, 0}, {1, 0}},
+// 	Vertex{{ 0.5, -0.5,  0.0}, {0, 1, 0}, {0, 0}},
+// 	Vertex{{ 0.5,  0.5,  0.0}, {0, 0, 1}, {0, 1}},
+// 	Vertex{{-0.5,  0.5,  0.0}, {1, 1, 1}, {1, 1}},
 	
-	Vertex{{-0.5, -0.5, -0.5}, {1, 0, 0}, {1, 0}},
-	Vertex{{ 0.5, -0.5, -0.5}, {0, 1, 0}, {0, 0}},
-	Vertex{{ 0.5,  0.5, -0.5}, {0, 0, 1}, {0, 1}},
-	Vertex{{-0.5,  0.5, -0.5}, {1, 1, 1}, {1, 1}},
-}
+// 	Vertex{{-0.5, -0.5, -0.5}, {1, 0, 0}, {1, 0}},
+// 	Vertex{{ 0.5, -0.5, -0.5}, {0, 1, 0}, {0, 0}},
+// 	Vertex{{ 0.5,  0.5, -0.5}, {0, 0, 1}, {0, 1}},
+// 	Vertex{{-0.5,  0.5, -0.5}, {1, 1, 1}, {1, 1}},
+// }
 
-indices: []u16 = {
-	0, 1, 2, 2, 3, 0,
-	4, 5, 6, 6, 7, 4,
-}
+// indices: []u16 = {
+// 	0, 1, 2, 2, 3, 0,
+// 	4, 5, 6, 6, 7, 4,
+// }
 
 get_binding_description :: proc() -> vk.VertexInputBindingDescription
 {
@@ -716,7 +716,6 @@ create_descriptor_set_layout :: proc()
 	vertexBinding.descriptorCount = 1
 	vertexBinding.descriptorType = .UNIFORM_BUFFER
 	vertexBinding.stageFlags = {.VERTEX}
-
 	
 	samplerBinding: vk.DescriptorSetLayoutBinding
 	samplerBinding.binding = 1
@@ -1188,14 +1187,14 @@ buf: ^vk.Buffer, bufMem: ^vk.DeviceMemory)
 
 create_vertex_buffer :: proc()
 {
-	bufSize := vk.DeviceSize(size_of(vertices[0]) * len(vertices))
+	bufSize := vk.DeviceSize(size_of(app.vertices[0]) * len(app.vertices))
 	stagingBuf: vk.Buffer
 	stagingMem: vk.DeviceMemory
 	create_buffer(bufSize, {.TRANSFER_SRC}, {.HOST_VISIBLE, .HOST_COHERENT}, &stagingBuf, &stagingMem)
 
 	data: rawptr
 	vk.MapMemory(app.device, stagingMem, 0, bufSize, nil, &data)
-	mem.copy(data, &vertices[0], int(bufSize))
+	mem.copy(data, &app.vertices[0], int(bufSize))
 	vk.UnmapMemory(app.device, stagingMem)
 
 	create_buffer(bufSize, {.TRANSFER_DST, .VERTEX_BUFFER}, {.DEVICE_LOCAL}, &app.vertexBuffer, &app.vertexBufferMemory)
@@ -1207,7 +1206,7 @@ create_vertex_buffer :: proc()
 
 create_index_buffer :: proc()
 {
-	bufSize := vk.DeviceSize(size_of(indices[0]) * u16(len(indices)))
+	bufSize := vk.DeviceSize(size_of(app.indices[0]) * u16(len(app.indices)))
 	
 	stagingBuf: vk.Buffer
 	stagingMem: vk.DeviceMemory
@@ -1215,7 +1214,7 @@ create_index_buffer :: proc()
 
 	data: rawptr
 	vk.MapMemory(app.device, stagingMem, 0, bufSize, nil, &data)
-	mem.copy(data, &indices[0], int(bufSize))
+	mem.copy(data, &app.indices[0], int(bufSize))
 	vk.UnmapMemory(app.device, stagingMem)
 
 	create_buffer(bufSize, {.TRANSFER_DST, .INDEX_BUFFER}, {.DEVICE_LOCAL}, &app.indexBuffer, &app.indexBufferMemory)
@@ -1318,14 +1317,17 @@ create_descriptor_sets :: proc()
 
 update_uniform_buffer :: proc(img: u32)
 {
+	sin := f32(math.sin(glfw.GetTime()))
 	ubo: UniformBufferObject
-	ubo.model = rotate_mat(f32(glfw.GetTime()), {0, 0, 1})
+	ubo.model = translate_mat({0, 0, 0})
+	ubo.model *= rotate_mat(f32(glfw.GetTime()), {0, 1, 0})
+	ubo.model *= scale_mat(0.3)
 	
 	camPos := camera.position
-	// camPos.xy *= -1
 	
-	// ubo.view  = linalg.matrix4_look_at_f32(camPos, camPos + {0, 0, 1}, {0, 1, 0}, true)
-	ubo.view  = linalg.matrix4_look_at_f32(camPos, 0, {0, 1, 0}, true)
+	ubo.view  = linalg.matrix4_look_at_f32(camPos, camPos + {0, 0, 1}, {0, -1, 0}, true)
+	// ubo.view *= translate_mat({0, 0, -3})
+	// ubo.view  = linalg.matrix4_look_at_f32(camPos, 0, {0, -1, 0}, false)
 	ubo.proj  = linalg.matrix4_perspective_f32(math.PI / 2, f32(app.swapExtent.width) / f32(app.swapExtent.height), 0.1, 100, true)
 	mem.copy(app.uniformBuffersMapped[img], &ubo, size_of(UniformBufferObject))
 }
@@ -1508,7 +1510,7 @@ record_command_buffer :: proc(cmdBuf: vk.CommandBuffer, index: u32)
 	vk.CmdSetScissor(cmdBuf, 0, 1, &scissor)
 
 	// vk.CmdDraw(buffer, u32(len(vertices)), 1, 0, 0)
-	vk.CmdDrawIndexed(cmdBuf, u32(len(indices)), 1, 0, 0, 0)
+	vk.CmdDrawIndexed(cmdBuf, u32(len(app.indices)), 1, 0, 0, 0)
 	vk.CmdEndRenderPass(cmdBuf)
 
 	if vk.EndCommandBuffer(cmdBuf) != .SUCCESS
@@ -1837,40 +1839,43 @@ load_model :: proc(name: cstring)
 	defer cgltf.free(data)
 	
 	// Load positions
-	pos: []Vec3 = parse_mesh_data(&data.accessors[0], Vec3)
-	fmt.println("len", len(pos))
-	for p in pos
+	pos     := parse_mesh_data(&data.accessors[0], Vec3)
+	nrm     := parse_mesh_data(&data.accessors[1], Vec3)
+	uv      := parse_mesh_data(&data.accessors[2], Vec2)
+	indices := parse_mesh_data(&data.accessors[3], u16)
+
+	vertices := make([]Vertex, len(pos))
+	for &v, i in vertices
 	{
-		fmt.println(p)
+		v.pos = pos[i]
+		v.texCoord = uv[i]
+		v.col = 1
 	}
+
+	app.indices = indices
+	app.vertices = vertices
 }
 
 parse_mesh_data :: proc(acc: ^cgltf.accessor, $T: typeid) -> []T
 {
-	data := make([]T, acc.count)
-	size := acc.count * acc.stride
-	uri  := &acc.buffer_view.data
-	fmt.println(acc.count)
-	fmt.println(acc.stride)
-	fmt.println(acc.type)
+	slice := make([]T, acc.count)
+	size  := acc.count * acc.stride
+	data  := acc.buffer_view.buffer.data
 	
-	for i in 0..<acc.count	
-	{
-		src := uintptr(uri) + uintptr(acc.offset) + uintptr(acc.stride * i)
-		
-		mem.copy(&data[i], rawptr(src), int(acc.stride))
-	}
-	
-	return data
+	src := uintptr(data) + uintptr(acc.buffer_view.offset)
+	mem.copy(&slice[0], rawptr(src), int(acc.buffer_view.size))
+
+	return slice
 }
 
 
 // ------------------------------               ----------------------------------------------\\
 
 // ------------------------------ EXTRA CODE ------------------------------------------------ \\
-IDENTITY :: linalg.MATRIX4F32_IDENTITY
+IDENTITY      :: linalg.MATRIX4F32_IDENTITY
 rotate_mat    :: linalg.matrix4_rotate_f32
 translate_mat :: linalg.matrix4_translate_f32
+scale_mat     :: linalg.matrix4_scale_f32
 
 shouldPrintFps := false
 lastFPSUpdateTime: f64
@@ -1885,7 +1890,7 @@ input: Input
 
 init_game :: proc()
 {
-	camera.position = {0, 1, 1}
+	camera.position = {0, 0, -1}
 	camera.speed = 5
 }
 
