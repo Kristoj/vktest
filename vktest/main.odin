@@ -771,7 +771,6 @@ create_graphics_pipeline :: proc()
 	inputAssembly: vk.PipelineInputAssemblyStateCreateInfo
 	inputAssembly.sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
 	inputAssembly.topology = .TRIANGLE_LIST
-	inputAssembly.primitiveRestartEnable = false
 
 	viewport: vk.Viewport
 	viewport.width = f32(app.swapExtent.width)
@@ -829,7 +828,6 @@ create_graphics_pipeline :: proc()
 		fmt.panicf("Could not create pipeline layout")
 	}
 	
-	// NOTE: Does this work when it goes out of scope ?
 	dynamicStates := []vk.DynamicState {.VIEWPORT, .SCISSOR}
 	
 	dynInfo: vk.PipelineDynamicStateCreateInfo  
