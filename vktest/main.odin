@@ -64,6 +64,7 @@ Application :: struct
 	vertexBufferMemory:  vk.DeviceMemory,
 	indexBuffer:         vk.Buffer,
 	indexBufferMemory:   vk.DeviceMemory,
+	mipLevels:           u32,
 	textureImage:        vk.Image,
 	textureMemory:       vk.DeviceMemory,
 	textureImageView:    vk.ImageView,
@@ -122,22 +123,141 @@ Vertex :: struct
 	texCoord: Vec2,
 }
 
-// vertices: []Vertex = {
-// 	Vertex{{-0.5, -0.5,  0.0}, {1, 0, 0}, {1, 0}},
-// 	Vertex{{ 0.5, -0.5,  0.0}, {0, 1, 0}, {0, 0}},
-// 	Vertex{{ 0.5,  0.5,  0.0}, {0, 0, 1}, {0, 1}},
-// 	Vertex{{-0.5,  0.5,  0.0}, {1, 1, 1}, {1, 1}},
-	
-// 	Vertex{{-0.5, -0.5, -0.5}, {1, 0, 0}, {1, 0}},
-// 	Vertex{{ 0.5, -0.5, -0.5}, {0, 1, 0}, {0, 0}},
-// 	Vertex{{ 0.5,  0.5, -0.5}, {0, 0, 1}, {0, 1}},
-// 	Vertex{{-0.5,  0.5, -0.5}, {1, 1, 1}, {1, 1}},
-// }
+init_window :: proc()
+{
+	initOk := glfw.Init()
+	if !initOk
+	{
+		desc, err := glfw.GetError()
+		fmt.panicf("Could not init glfw: ", desc, err)
+	}
 
-// indices: []u16 = {
-// 	0, 1, 2, 2, 3, 0,
-// 	4, 5, 6, 6, 7, 4,
-// }
+	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
+	glfw.WindowHint(glfw.RESIZABLE,  glfw.TRUE)
+	app.window = glfw.CreateWindow(winWidth, winHeight, "VKTEST", nil, nil)
+	glfw.MakeContextCurrent(app.window)
+	
+	glfw.SetKeyCallback(app.window, key_callback)
+	glfw.SetFramebufferSizeCallback(app.window, framebuffer_size_callback)
+}
+
+framebuffer_size_callback :: proc "c" (window: glfw.WindowHandle, width, height: c.int)
+{
+	app.wasFramebufferResized = true
+}
+
+init_vulkan :: proc()
+{
+	vk.load_proc_addresses_global(rawptr(glfw.GetInstanceProcAddress))
+	
+	create_instance()
+	vk.load_proc_addresses_instance(app.instance)
+	
+	setup_debug_messenger()
+	create_surface()
+	pick_physical_device()
+	create_logical_device()
+	vk.load_proc_addresses_device(app.device)
+
+	create_swapchain()
+	create_image_views()
+	create_render_pass()
+	create_descriptor_set_layout()
+	create_graphics_pipeline()
+	create_command_pool()
+	create_depth_resources()
+	create_framebuffers()
+	create_texture_image()
+	create_texture_image_view()
+	create_texture_sampler()
+	load_model("res/models/spitter.gltf")
+	create_vertex_buffer()
+	create_index_buffer()
+	create_uniform_buffers()
+	create_descriptor_pool()
+	create_descriptor_sets()
+	create_command_buffers()
+	create_sync_objects()
+}
+
+cleanup :: proc()
+{
+	cleanup_swapchain()
+
+	vk.DestroySampler(app.device, app.textureSampler, nil)
+	vk.DestroyImageView(app.device, app.textureImageView, nil)
+	vk.DestroyImage(app.device, app.textureImage, nil)
+	vk.FreeMemory(app.device, app.textureMemory, nil)
+	
+	vk.DestroyImageView(app.device, app.depthImageView, nil)
+	vk.DestroyImage(app.device, app.depthImage, nil)
+	vk.FreeMemory(app.device, app.depthImageMemory, nil)
+
+	for i in 0..<MAX_FRAMES_IN_FLIGHT
+	{
+		vk.DestroyBuffer(app.device, app.uniformBuffers[i], nil)
+		vk.FreeMemory(app.device, app.uniformBuffersMemory[i], nil)
+
+	}
+	
+	vk.DestroyDescriptorPool(app.device, app.descriptorPool, nil)
+	vk.DestroyDescriptorSetLayout(app.device, app.descriptorSetLayout, nil)
+
+	vk.DestroyBuffer(app.device, app.vertexBuffer, nil)
+	vk.FreeMemory(app.device, app.vertexBufferMemory, nil)
+	
+	vk.DestroyBuffer(app.device, app.indexBuffer, nil)
+	vk.FreeMemory(app.device, app.indexBufferMemory, nil)
+	
+	vk.DestroyPipeline(app.device, app.graphicsPipeline, nil)
+	vk.DestroyPipelineLayout(app.device, app.pipelineLayout, nil)
+	vk.DestroyRenderPass(app.device, app.renderPass, nil)
+	
+	for i in 0..<MAX_FRAMES_IN_FLIGHT
+	{
+		vk.DestroySemaphore(app.device, app.imgAvailableSemaphores[i], nil)
+		vk.DestroySemaphore(app.device, app.renderFinishedSemaphores[i], nil)
+		vk.DestroyFence(app.device, app.inFlightFences[i], nil)
+	}
+	
+	vk.DestroyCommandPool(app.device, app.commandPool, nil)
+	vk.DestroyDevice(app.device, nil)
+	
+	if ENABLE_VALIDATION_LAYERS
+	{
+		vk.DestroyDebugUtilsMessengerEXT(app.instance, app.debugMessenger, nil)
+	}
+	
+	vk.DestroySurfaceKHR(app.instance, app.surface, nil)
+	vk.DestroyInstance(app.instance, nil)
+
+	glfw.DestroyWindow(app.window)
+	glfw.Terminate()
+}
+
+main_loop :: proc()
+{
+	init_game()
+	
+	for !glfw.WindowShouldClose(app.window)
+	{
+		glfw.PollEvents()
+		update_input()
+		update_fps()
+		
+		// Update deltatime
+		curTime := glfw.GetTime()
+		app.dt = f32(curTime - app.lastFrameRenderTime)
+		app.lastFrameRenderTime = curTime
+		
+		move_camera()
+		reset_input()
+		
+		draw_frame()
+	}
+
+	vk.DeviceWaitIdle(app.device)
+}
 
 get_binding_description :: proc() -> vk.VertexInputBindingDescription
 {
@@ -168,69 +288,6 @@ get_attribute_description :: proc() -> []vk.VertexInputAttributeDescription
 	desc[2].offset = u32(offset_of_by_string(Vertex, "texCoord"))
 	
 	return desc
-}
-
-init_window :: proc()
-{
-	initOk := glfw.Init()
-	if !initOk
-	{
-		desc, err := glfw.GetError()
-		fmt.panicf("Could not init glfw: ", desc, err)
-	}
-
-	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
-	glfw.WindowHint(glfw.RESIZABLE,  glfw.TRUE)
-	app.window = glfw.CreateWindow(winWidth, winHeight, "VKTEST", nil, nil)
-	glfw.MakeContextCurrent(app.window)
-	
-	glfw.SetKeyCallback(app.window, key_callback)
-	glfw.SetFramebufferSizeCallback(app.window, framebuffer_size_callback)
-}
-
-framebuffer_size_callback :: proc "c" (window: glfw.WindowHandle, width, height: c.int)
-{
-	app.wasFramebufferResized = true
-}
-
-main_loop :: proc()
-{
-	init_game()
-	
-	for !glfw.WindowShouldClose(app.window)
-	{
-		glfw.PollEvents()
-		update_input()
-		update_fps()
-		
-		// Update deltatime
-		curTime := glfw.GetTime()
-		app.dt = f32(curTime - app.lastFrameRenderTime)
-		app.lastFrameRenderTime = curTime
-		
-		move_camera()
-		reset_input()
-		
-		draw_frame()
-	}
-
-	vk.DeviceWaitIdle(app.device)
-}
-
-update_fps :: proc()
-{
-	if !shouldPrintFps	
-	{
-		return
-	}
-	
-	fps += 1
-	if glfw.GetTime() >= lastFPSUpdateTime + 1
-	{
-		fmt.println("FPS:", fps)
-		lastFPSUpdateTime = glfw.GetTime()
-		fps = 0
-	}
 }
 
 draw_frame :: proc()
@@ -302,95 +359,6 @@ draw_frame :: proc()
 	app.currentFrame = (app.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT
 }
 
-cleanup :: proc()
-{
-	cleanup_swapchain()
-
-	vk.DestroySampler(app.device, app.textureSampler, nil)
-	vk.DestroyImageView(app.device, app.textureImageView, nil)
-	vk.DestroyImage(app.device, app.textureImage, nil)
-	vk.FreeMemory(app.device, app.textureMemory, nil)
-	
-	vk.DestroyImageView(app.device, app.depthImageView, nil)
-	vk.DestroyImage(app.device, app.depthImage, nil)
-	vk.FreeMemory(app.device, app.depthImageMemory, nil)
-
-	for i in 0..<MAX_FRAMES_IN_FLIGHT
-	{
-		vk.DestroyBuffer(app.device, app.uniformBuffers[i], nil)
-		vk.FreeMemory(app.device, app.uniformBuffersMemory[i], nil)
-
-	}
-	
-	vk.DestroyDescriptorPool(app.device, app.descriptorPool, nil)
-	vk.DestroyDescriptorSetLayout(app.device, app.descriptorSetLayout, nil)
-
-	vk.DestroyBuffer(app.device, app.vertexBuffer, nil)
-	vk.FreeMemory(app.device, app.vertexBufferMemory, nil)
-	
-	vk.DestroyBuffer(app.device, app.indexBuffer, nil)
-	vk.FreeMemory(app.device, app.indexBufferMemory, nil)
-	
-	vk.DestroyPipeline(app.device, app.graphicsPipeline, nil)
-	vk.DestroyPipelineLayout(app.device, app.pipelineLayout, nil)
-	vk.DestroyRenderPass(app.device, app.renderPass, nil)
-	
-	for i in 0..<MAX_FRAMES_IN_FLIGHT
-	{
-		vk.DestroySemaphore(app.device, app.imgAvailableSemaphores[i], nil)
-		vk.DestroySemaphore(app.device, app.renderFinishedSemaphores[i], nil)
-		vk.DestroyFence(app.device, app.inFlightFences[i], nil)
-	}
-	
-	vk.DestroyCommandPool(app.device, app.commandPool, nil)
-	vk.DestroyDevice(app.device, nil)
-	
-	if ENABLE_VALIDATION_LAYERS
-	{
-		vk.DestroyDebugUtilsMessengerEXT(app.instance, app.debugMessenger, nil)
-	}
-	
-	vk.DestroySurfaceKHR(app.instance, app.surface, nil)
-	vk.DestroyInstance(app.instance, nil)
-
-	glfw.DestroyWindow(app.window)
-	glfw.Terminate()
-}
-
-init_vulkan :: proc()
-{
-	vk.load_proc_addresses_global(rawptr(glfw.GetInstanceProcAddress))
-	
-	create_instance()
-	vk.load_proc_addresses_instance(app.instance)
-	
-	setup_debug_messenger()
-	create_surface()
-	pick_physical_device()
-	create_logical_device()
-	vk.load_proc_addresses_device(app.device)
-
-	create_swapchain()
-	create_image_views()
-	create_render_pass()
-	create_descriptor_set_layout()
-	create_graphics_pipeline()
-	create_command_pool()
-	create_depth_resources()
-	create_framebuffers()
-	create_texture_image()
-	create_texture_image_view()
-	create_texture_sampler()
-	load_model("res/models/monkey.glb")
-	create_vertex_buffer()
-	create_index_buffer()
-	create_uniform_buffers()
-	create_descriptor_pool()
-	create_descriptor_sets()
-	create_command_buffers()
-	create_sync_objects()
-}
-
 create_instance :: proc()
 {
 	if ENABLE_VALIDATION_LAYERS && !check_validation_layer_support()
@@ -449,18 +417,40 @@ pick_physical_device :: proc()
 	devices := make([]vk.PhysicalDevice, count)
 	vk.EnumeratePhysicalDevices(app.instance, &count, raw_data(devices))
 
+	suitableDevices: [dynamic]vk.PhysicalDevice
+
 	for dev in devices
 	{
 		if is_device_suitable(dev)
 		{
 			app.physicalDevice = dev
-			break
+			append(&suitableDevices, dev)
 		}
 	}
 
-	if app.physicalDevice == nil
+	// Pick best physical device
+	chosenDevice: vk.PhysicalDevice
+	for dev in suitableDevices
+	{
+		props: vk.PhysicalDeviceProperties
+		vk.GetPhysicalDeviceProperties(dev, &props)
+
+		if props.deviceType == .DISCRETE_GPU
+		{
+			chosenDevice = dev
+			fmt.printfln("Chosen physical device: %s", props.deviceName)
+			break
+		}
+
+	}
+
+	if chosenDevice == nil
 	{
 		fmt.panicf("Failed to find suitable GPU")
+	}
+	else
+	{
+		app.physicalDevice = chosenDevice
 	}
 }
 
@@ -635,7 +625,7 @@ create_image_views :: proc()
 
 	for i in 0..<len(app.swapImages)
 	{
-		app.swapImageViews[i] = create_image_view(app.swapImages[i], app.swapImageFormat, {.COLOR})
+		app.swapImageViews[i] = create_image_view(app.swapImages[i], app.swapImageFormat, {.COLOR}, 1)
 	}
 
 }
@@ -944,14 +934,14 @@ create_depth_resources :: proc()
 {
 	depthFormat := find_depth_format()
 	
-	create_image(app.swapExtent.width, app.swapExtent.height, depthFormat, .OPTIMAL, 
+	create_image(app.swapExtent.width, app.swapExtent.height, 1, depthFormat, .OPTIMAL, 
 		{.DEPTH_STENCIL_ATTACHMENT}, {.DEVICE_LOCAL}, &app.depthImage, &app.depthImageMemory) 
-	app.depthImageView = create_image_view(app.depthImage, depthFormat, {.DEPTH})
+	app.depthImageView = create_image_view(app.depthImage, depthFormat, {.DEPTH}, 1)
 	
-	transition_image_layout(app.depthImage, depthFormat, .UNDEFINED, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+	transition_image_layout(app.depthImage, depthFormat, .UNDEFINED, .DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 1)
 }
 
-create_image :: proc(width, height: u32, format: vk.Format, tiling: vk.ImageTiling,
+create_image :: proc(width, height: u32, mipLevels: u32, format: vk.Format, tiling: vk.ImageTiling,
 	usage: vk.ImageUsageFlags, props: vk.MemoryPropertyFlags, image:  ^vk.Image, imageMem: ^vk.DeviceMemory)
 {
 	
@@ -961,7 +951,7 @@ create_image :: proc(width, height: u32, format: vk.Format, tiling: vk.ImageTili
 	imageInfo.extent.width =  width
 	imageInfo.extent.height = height
 	imageInfo.extent.depth = 1
-	imageInfo.mipLevels = 1
+	imageInfo.mipLevels = mipLevels
 	imageInfo.arrayLayers = 1
 	imageInfo.format = format
 	imageInfo.tiling = tiling
@@ -992,9 +982,10 @@ create_image :: proc(width, height: u32, format: vk.Format, tiling: vk.ImageTili
 
 create_texture_image :: proc()
 {
+	// Load image from disk
 	width, height, channels: c.int
-		// load           :: proc(filename: cstring, x, y, channels_in_file: ^c.int, desired_channels: c.int) -> [^]byte ---
-	image := stbi.load("res/tex/texture.jpg", &width, &height, &channels, 4)
+	image := stbi.load("res/tex/spitter_col.png", &width, &height, &channels, 4)
+	app.mipLevels = u32(math.floor_f32(math.log2_f32(max(f32(width), f32(height)))) + 1)
 	if image == nil
 	{
 		fmt.panicf("Failed to load texture image")
@@ -1004,7 +995,6 @@ create_texture_image :: proc()
 	imgSize := vk.DeviceSize(width * height * 4)
 	stagingBuf: vk.Buffer
 	stagingMem: vk.DeviceMemory
-
 	create_buffer(imgSize, {.TRANSFER_SRC}, {.HOST_VISIBLE, .HOST_COHERENT}, &stagingBuf, &stagingMem)
 
 	data: rawptr
@@ -1012,18 +1002,112 @@ create_texture_image :: proc()
 	mem.copy(data, image, int(imgSize))
 	vk.UnmapMemory(app.device, stagingMem)
 
-	create_image(u32(width), u32(height), vk.Format.R8G8B8A8_SRGB, vk.ImageTiling.OPTIMAL, 
-		{.TRANSFER_DST, .SAMPLED}, {.DEVICE_LOCAL}, &app.textureImage, &app.textureMemory)
+	create_image(u32(width), u32(height), app.mipLevels, vk.Format.R8G8B8A8_SRGB, vk.ImageTiling.OPTIMAL, 
+		{.TRANSFER_DST, .TRANSFER_SRC, .SAMPLED}, {.DEVICE_LOCAL}, &app.textureImage, &app.textureMemory)
 	
-	transition_image_layout(app.textureImage, .R8G8B8A8_SRGB, .UNDEFINED, .TRANSFER_DST_OPTIMAL)
+	transition_image_layout(app.textureImage, .R8G8B8A8_SRGB, .UNDEFINED, .TRANSFER_DST_OPTIMAL, app.mipLevels)
 		copy_buffer_to_image(stagingBuf, app.textureImage, u32(width), u32(height))
-	transition_image_layout(app.textureImage, .R8G8B8A8_SRGB, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL)
+	// transition_image_layout(app.textureImage, .R8G8B8A8_SRGB, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL, app.mipLevels)
+	generate_mipmaps(app.textureImage, .R8G8B8A8_SRGB, u32(width), u32(height), app.mipLevels)
 
 	vk.DestroyBuffer(app.device, stagingBuf, nil)
 	vk.FreeMemory(app.device, stagingMem, nil)
 }
 
-create_image_view :: proc(image: vk.Image, format: vk.Format, aspectFlags: vk.ImageAspectFlags) -> vk.ImageView
+generate_mipmaps :: proc(image: vk.Image, format: vk.Format, width, height: u32, mipLevels: u32)
+{
+	// LInear blit support check
+	props: vk.FormatProperties
+	vk.GetPhysicalDeviceFormatProperties(app.physicalDevice, format, &props)
+	if .SAMPLED_IMAGE_FILTER_LINEAR in props.optimalTilingFeatures == false
+	{
+		fmt.panicf("Texture image does not support linear blitting")
+	}
+	mipWidth := i32(width)
+	mipHeight := i32(height)
+	
+	cmdBuf := begin_single_time_commands()
+	barrier: vk.ImageMemoryBarrier
+	barrier.sType = .IMAGE_MEMORY_BARRIER
+	barrier.image = image
+	barrier.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+	barrier.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED
+	barrier.subresourceRange.aspectMask = {.COLOR}
+	barrier.subresourceRange.levelCount = 1
+	barrier.subresourceRange.layerCount = 1
+
+	for i in 1..<mipLevels
+	{
+		barrier.subresourceRange.baseMipLevel = i - 1
+		barrier.oldLayout = .TRANSFER_DST_OPTIMAL
+		barrier.newLayout = .TRANSFER_SRC_OPTIMAL
+		barrier.srcAccessMask = {.TRANSFER_WRITE}
+		barrier.dstAccessMask = {.TRANSFER_READ}
+
+		vk.CmdPipelineBarrier(
+			cmdBuf, {.TRANSFER}, {.TRANSFER}, nil,
+			0, nil,
+			0, nil,
+			1, &barrier
+		)
+
+		blit: vk.ImageBlit
+		blit.srcOffsets[0] = {0, 0, 0}
+		blit.srcOffsets[1] = {mipWidth, mipHeight, 1}
+		blit.srcSubresource.aspectMask = {.COLOR}
+		blit.srcSubresource.mipLevel = i - 1
+		blit.srcSubresource.layerCount = 1
+
+		blit.dstOffsets[0] = {0, 0, 0}
+		blit.dstOffsets[1] = {mipWidth / 2 if mipWidth > 1 else 1, mipHeight / 2 if mipHeight > 1 else 1, 1}
+		blit.dstSubresource.aspectMask = {.COLOR}
+		blit.dstSubresource.mipLevel = i
+		blit.dstSubresource.layerCount = 1
+
+		vk.CmdBlitImage(
+			cmdBuf, 
+			image, .TRANSFER_SRC_OPTIMAL,
+			image, .TRANSFER_DST_OPTIMAL, 
+			1, &blit,
+			.NEAREST
+		)
+
+		barrier.oldLayout = .TRANSFER_SRC_OPTIMAL
+		barrier.newLayout = .SHADER_READ_ONLY_OPTIMAL
+		barrier.dstAccessMask = {.TRANSFER_READ}
+		barrier.dstAccessMask = {.SHADER_READ}
+		
+		vk.CmdPipelineBarrier(
+			cmdBuf,
+			{.TRANSFER}, {.FRAGMENT_SHADER}, nil,
+			0, nil,
+			0, nil,
+			1, &barrier
+		)
+
+		if mipWidth  > 1 do mipWidth  /= 2
+		if mipHeight > 1 do mipHeight /= 2
+	}
+
+	barrier.subresourceRange.baseMipLevel = mipLevels - 1
+	barrier.oldLayout = .TRANSFER_DST_OPTIMAL
+	barrier.newLayout = .SHADER_READ_ONLY_OPTIMAL
+	barrier.srcAccessMask = {.TRANSFER_WRITE}
+	barrier.dstAccessMask = {.SHADER_READ}
+
+	vk.CmdPipelineBarrier(
+		cmdBuf, 
+		{.TRANSFER}, {.FRAGMENT_SHADER}, nil,
+		0, nil,
+		0, nil,
+		1, &barrier
+	)
+	
+	end_single_time_commands(cmdBuf)
+	
+}
+
+create_image_view :: proc(image: vk.Image, format: vk.Format, aspectFlags: vk.ImageAspectFlags, mipLevels: u32) -> vk.ImageView
 {
 	viewInfo: vk.ImageViewCreateInfo
 	viewInfo.sType = .IMAGE_VIEW_CREATE_INFO
@@ -1031,7 +1115,7 @@ create_image_view :: proc(image: vk.Image, format: vk.Format, aspectFlags: vk.Im
 	viewInfo.viewType = .D2
 	viewInfo.format = format
 	viewInfo.subresourceRange.aspectMask = aspectFlags
-	viewInfo.subresourceRange.levelCount = 1
+	viewInfo.subresourceRange.levelCount = mipLevels
 	viewInfo.subresourceRange.layerCount = 1
 	
 	view: vk.ImageView
@@ -1045,7 +1129,7 @@ create_image_view :: proc(image: vk.Image, format: vk.Format, aspectFlags: vk.Im
 
 create_texture_image_view :: proc()
 {
-	app.textureImageView = create_image_view(app.textureImage, .R8G8B8A8_SRGB, {.COLOR})
+	app.textureImageView = create_image_view(app.textureImage, .R8G8B8A8_SRGB, {.COLOR}, app.mipLevels)
 }
 
 create_texture_sampler :: proc()
@@ -1066,7 +1150,9 @@ create_texture_sampler :: proc()
 	samplerInfo.unnormalizedCoordinates = false
 	samplerInfo.compareEnable = false
 	samplerInfo.compareOp = .ALWAYS
-	samplerInfo.mipmapMode = .LINEAR
+	samplerInfo.mipmapMode = .NEAREST
+	samplerInfo.minLod = 0
+	samplerInfo.maxLod = f32(app.mipLevels)
 
 	if vk.CreateSampler(app.device, &samplerInfo, nil, &app.textureSampler) != .SUCCESS
 	{
@@ -1075,7 +1161,7 @@ create_texture_sampler :: proc()
 }
 
 transition_image_layout :: proc(image: vk.Image, format: vk.Format, 
-oldLayout: vk.ImageLayout, newLayout: vk.ImageLayout)
+oldLayout: vk.ImageLayout, newLayout: vk.ImageLayout, mipLevels: u32)
 {
 	cmdBuf := begin_single_time_commands()
 	
@@ -1088,7 +1174,7 @@ oldLayout: vk.ImageLayout, newLayout: vk.ImageLayout)
 	barrier.image = image
 	barrier.subresourceRange.aspectMask = {.COLOR}
 	barrier.subresourceRange.baseMipLevel = 0
-	barrier.subresourceRange.levelCount = 1
+	barrier.subresourceRange.levelCount = mipLevels
 	barrier.subresourceRange.baseArrayLayer = 0
 	barrier.subresourceRange.layerCount = 1
 	barrier.srcAccessMask = nil // TODO
@@ -1319,7 +1405,7 @@ update_uniform_buffer :: proc(img: u32)
 	ubo: UniformBufferObject
 	ubo.model = translate_mat({0, 0, 0})
 	ubo.model *= rotate_mat(f32(glfw.GetTime()), {0, 1, 0})
-	ubo.model *= scale_mat(0.3)
+	ubo.model *= scale_mat(0.5)
 	
 	camPos := camera.position
 	
@@ -1542,8 +1628,6 @@ is_device_suitable :: proc(device: vk.PhysicalDevice) -> bool
 	props:    vk.PhysicalDeviceProperties
 	vk.GetPhysicalDeviceFeatures(device, &features)
 	vk.GetPhysicalDeviceProperties(device, &props)
-
-	fmt.printfln("%s", props.deviceName)
 
 	indices := find_queue_families(device)
 	extSupported := check_device_extension_support(device)
@@ -1919,3 +2003,20 @@ move_camera :: proc()
 {
 	camera.position += input.move * camera.speed * app.dt
 }
+
+update_fps :: proc()
+{
+	if !shouldPrintFps	
+	{
+		return
+	}
+	
+	fps += 1
+	if glfw.GetTime() >= lastFPSUpdateTime + 1
+	{
+		fmt.println("FPS:", fps)
+		lastFPSUpdateTime = glfw.GetTime()
+		fps = 0
+	}
+}
+
