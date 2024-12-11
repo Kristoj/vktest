@@ -423,7 +423,6 @@ pick_physical_device :: proc()
 	{
 		if is_device_suitable(dev)
 		{
-			app.physicalDevice = dev
 			append(&suitableDevices, dev)
 		}
 	}
@@ -2020,7 +2019,6 @@ update_fps :: proc()
 		str := strings.to_cstring(&builder)
 		glfw.SetWindowTitle(app.window, str)
 	
-		// fmt.println("FPS:", fps)
 		lastFPSUpdateTime = glfw.GetTime()
 		fps = 0
 	}
