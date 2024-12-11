@@ -18,7 +18,7 @@ import vk "vendor:vulkan"
 import stbi "vendor:stb/image"
 import "vendor:cgltf"
 
-ENABLE_VALIDATION_LAYERS :: true
+ENABLE_VALIDATION_LAYERS :: false
 
 NULL_HANDLE :: 0
 MAX_FRAMES_IN_FLIGHT :: 2
@@ -1959,8 +1959,8 @@ rotate_mat    :: linalg.matrix4_rotate_f32
 translate_mat :: linalg.matrix4_translate_f32
 scale_mat     :: linalg.matrix4_scale_f32
 
-shouldPrintFps := false
-lastFPSUpdateTime: f64
+shouldPrintFps := true
+lastFPSUpdateTime: f64 
 fps: u32
 
 
@@ -1973,11 +1973,12 @@ input: Input
 init_game :: proc()
 {
 	camera.position = {0, 0, -1}
-	camera.speed = 5
+	camera.speed = 2.5
 }
 
 update_input :: proc()
 {
+	velocity := 1 * app.dt
 	if glfw.GetKey(app.window, glfw.KEY_W) != 0 do input.move.z += 1
 	if glfw.GetKey(app.window, glfw.KEY_S) != 0 do input.move.z -= 1
 	if glfw.GetKey(app.window, glfw.KEY_D) != 0 do input.move.x += 1
@@ -2010,11 +2011,16 @@ update_fps :: proc()
 	{
 		return
 	}
-	
+
 	fps += 1
 	if glfw.GetTime() >= lastFPSUpdateTime + 1
 	{
-		fmt.println("FPS:", fps)
+		builder: strings.Builder
+		strings.write_uint(&builder, uint(fps))
+		str := strings.to_cstring(&builder)
+		glfw.SetWindowTitle(app.window, str)
+	
+		// fmt.println("FPS:", fps)
 		lastFPSUpdateTime = glfw.GetTime()
 		fps = 0
 	}
