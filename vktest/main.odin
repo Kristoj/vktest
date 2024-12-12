@@ -18,7 +18,7 @@ import vk "vendor:vulkan"
 import stbi "vendor:stb/image"
 import "vendor:cgltf"
 
-ENABLE_VALIDATION_LAYERS :: false
+ENABLE_VALIDATION_LAYERS :: true
 
 NULL_HANDLE :: 0
 MAX_FRAMES_IN_FLIGHT :: 2
@@ -73,9 +73,9 @@ Application :: struct
 	depthImageMemory:    vk.DeviceMemory,
 	depthImageView:      vk.ImageView,
 
-	vertices: []Vertex,
-	indices:  []u16,
-	
+	// vertices: []Vertex,
+	// indices:  []u16,
+
 	uniformBuffers:       [dynamic]vk.Buffer,
 	uniformBuffersMemory: [dynamic]vk.DeviceMemory,
 	uniformBuffersMapped: [dynamic]rawptr,
@@ -90,6 +90,24 @@ Application :: struct
 	dt:                    f32,
 }
 app: Application
+
+Mesh :: struct
+{
+	vertices: []Vertex,
+	indices:  []u16,
+}
+
+RenderBatch :: struct
+{
+	vertices: []Vertex,
+	indices:  []u16,
+
+	offsets:  []u32,
+	counts:   []u32,
+
+	length:   u32,
+}
+renderBatches: [dynamic]RenderBatch
 
 
 QueueFamilyIndices :: struct
@@ -170,9 +188,15 @@ init_vulkan :: proc()
 	create_texture_image()
 	create_texture_image_view()
 	create_texture_sampler()
-	load_model("res/models/spitter.gltf")
-	create_vertex_buffer()
-	create_index_buffer()
+	// spitter := load_model("res/models/spitter.gltf")
+	// plane   := load_model("res/models/plane.glb")
+	handle := create_render_batch({
+		load_model("res/models/plane.glb"),
+		load_model("res/models/spitter.gltf"),
+	})
+
+	create_vertex_buffer(handle)
+	create_index_buffer(handle)
 	create_uniform_buffers()
 	create_descriptor_pool()
 	create_descriptor_sets()
@@ -879,7 +903,6 @@ create_framebuffers :: proc()
 			fmt.panicf("Failed to create framebuffer")
 		}
 	}
-	
 }
 
 create_command_pool :: proc()
@@ -1015,7 +1038,7 @@ create_texture_image :: proc()
 
 generate_mipmaps :: proc(image: vk.Image, format: vk.Format, width, height: u32, mipLevels: u32)
 {
-	// LInear blit support check
+	// Linear blit support check
 	props: vk.FormatProperties
 	vk.GetPhysicalDeviceFormatProperties(app.physicalDevice, format, &props)
 	if .SAMPLED_IMAGE_FILTER_LINEAR in props.optimalTilingFeatures == false
@@ -1103,7 +1126,6 @@ generate_mipmaps :: proc(image: vk.Image, format: vk.Format, width, height: u32,
 	)
 	
 	end_single_time_commands(cmdBuf)
-	
 }
 
 create_image_view :: proc(image: vk.Image, format: vk.Format, aspectFlags: vk.ImageAspectFlags, mipLevels: u32) -> vk.ImageView
@@ -1268,16 +1290,17 @@ buf: ^vk.Buffer, bufMem: ^vk.DeviceMemory)
 	vk.BindBufferMemory(app.device, buf^, bufMem^, 0)
 }
 
-create_vertex_buffer :: proc()
+create_vertex_buffer :: proc(handle: RenderBatchHandle)
 {
-	bufSize := vk.DeviceSize(size_of(app.vertices[0]) * len(app.vertices))
+	batch := &renderBatches[handle]
+	bufSize := vk.DeviceSize(size_of(batch.vertices[0]) * len(batch.vertices))
 	stagingBuf: vk.Buffer
 	stagingMem: vk.DeviceMemory
 	create_buffer(bufSize, {.TRANSFER_SRC}, {.HOST_VISIBLE, .HOST_COHERENT}, &stagingBuf, &stagingMem)
 
 	data: rawptr
 	vk.MapMemory(app.device, stagingMem, 0, bufSize, nil, &data)
-	mem.copy(data, &app.vertices[0], int(bufSize))
+	mem.copy(data, &batch.vertices[0], int(bufSize))
 	vk.UnmapMemory(app.device, stagingMem)
 
 	create_buffer(bufSize, {.TRANSFER_DST, .VERTEX_BUFFER}, {.DEVICE_LOCAL}, &app.vertexBuffer, &app.vertexBufferMemory)
@@ -1287,9 +1310,10 @@ create_vertex_buffer :: proc()
 	vk.FreeMemory(app.device, stagingMem, nil)
 }
 
-create_index_buffer :: proc()
+create_index_buffer :: proc(handle: RenderBatchHandle)
 {
-	bufSize := vk.DeviceSize(size_of(app.indices[0]) * u16(len(app.indices)))
+	batch := &renderBatches[handle]
+	bufSize := vk.DeviceSize(size_of(batch.indices[0]) * u16(len(batch.indices)))
 	
 	stagingBuf: vk.Buffer
 	stagingMem: vk.DeviceMemory
@@ -1297,7 +1321,7 @@ create_index_buffer :: proc()
 
 	data: rawptr
 	vk.MapMemory(app.device, stagingMem, 0, bufSize, nil, &data)
-	mem.copy(data, &app.indices[0], int(bufSize))
+	mem.copy(data, &batch.indices[0], int(bufSize))
 	vk.UnmapMemory(app.device, stagingMem)
 
 	create_buffer(bufSize, {.TRANSFER_DST, .INDEX_BUFFER}, {.DEVICE_LOCAL}, &app.indexBuffer, &app.indexBufferMemory)
@@ -1572,14 +1596,6 @@ record_command_buffer :: proc(cmdBuf: vk.CommandBuffer, index: u32)
 	vk.CmdBeginRenderPass(cmdBuf, &renderInfo, .INLINE)
 	vk.CmdBindPipeline(cmdBuf, .GRAPHICS, app.graphicsPipeline)
 
-	vertexBuffers: []vk.Buffer = {app.vertexBuffer}
-	deviceOffsets: []vk.DeviceSize = {0}
-	vk.CmdBindVertexBuffers(cmdBuf, 0, 1, raw_data(vertexBuffers), raw_data(deviceOffsets))
-
-	vk.CmdBindIndexBuffer(cmdBuf, app.indexBuffer, 0, .UINT16)
-
-	vk.CmdBindDescriptorSets(cmdBuf, .GRAPHICS, app.pipelineLayout, 0, 1, &app.descriptorSets[app.currentFrame], 0, nil)
-
 	viewport: vk.Viewport
 	viewport.width = f32(app.swapExtent.width)
 	viewport.height = f32(app.swapExtent.height)
@@ -1591,9 +1607,27 @@ record_command_buffer :: proc(cmdBuf: vk.CommandBuffer, index: u32)
 	scissor.offset = {0, 0}
 	scissor.extent = app.swapExtent
 	vk.CmdSetScissor(cmdBuf, 0, 1, &scissor)
+	
+	vertexBuffers: []vk.Buffer = {app.vertexBuffer}
+	deviceOffsets: []vk.DeviceSize = {0}
+	vk.CmdBindVertexBuffers(cmdBuf, 0, 1, raw_data(vertexBuffers), raw_data(deviceOffsets))
 
-	// vk.CmdDraw(buffer, u32(len(vertices)), 1, 0, 0)
-	vk.CmdDrawIndexed(cmdBuf, u32(len(app.indices)), 1, 0, 0, 0)
+	vk.CmdBindIndexBuffer(cmdBuf, app.indexBuffer, 0, .UINT16)
+
+	vk.CmdBindDescriptorSets(cmdBuf, .GRAPHICS, app.pipelineLayout, 0, 1, &app.descriptorSets[app.currentFrame], 0, nil)
+
+	// vk.CmdDrawIndexed(cmdBuf, u32(len(renderBatches[0].indices)), 1, 0, 0, 0)
+	// bat := &renderBatches[0]
+	// vk.CmdDrawIndexed(cmdBuf, bat.counts[1], 1, bat.offsets[1], 0, 0)
+	
+	for batch in renderBatches
+	{
+		for i in 0..<batch.length
+		{
+			vk.CmdDrawIndexed(cmdBuf, batch.counts[i], 1, batch.offsets[i], 0, 0)
+		}
+	}
+
 	vk.CmdEndRenderPass(cmdBuf)
 
 	if vk.EndCommandBuffer(cmdBuf) != .SUCCESS
@@ -1795,7 +1829,7 @@ populate_debug_messenger_create_info :: proc(createInfo: ^vk.DebugUtilsMessenger
 {
 	createInfo.sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT
 	createInfo.messageSeverity = {.VERBOSE, .WARNING, .ERROR}
-	createInfo.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE}
+	createInfo.messageType = {.VALIDATION, .PERFORMANCE}
 	createInfo.pfnUserCallback = debug_callback
 }
 
@@ -1902,9 +1936,46 @@ key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods
 
 }
 
+RenderBatchHandle :: distinct int
+create_render_batch :: proc(meshes: []^Mesh) -> RenderBatchHandle
+{
+	batch: RenderBatch
+	batch.counts = make([]u32, len(meshes))
+	batch.offsets = make([]u32, len(meshes))
+	batch.length = u32(len(meshes))
+	offset: u32
+	
+	vertices: [dynamic]Vertex
+	indices:  [dynamic]u16
+	
+	for mesh, i in meshes
+	{
+		append(&vertices, ..mesh.vertices)
+		append(&indices,  ..mesh.indices)
+
+		batch.offsets[i] = offset
+		batch.counts[i] = u32(len(mesh.indices))
+
+		offset += batch.counts[i]
+	}
+
+	for i in 0..<len(batch.offsets)
+	{
+		fmt.println("offset", batch.offsets[i])
+		fmt.println("lengths", batch.counts[i])
+	}
+	
+	batch.vertices = vertices[:]
+	batch.indices  = indices[:]
+	
+	append(&renderBatches, batch)
+
+	return RenderBatchHandle((len(renderBatches) - 1))
+}
+
 // ------------------------------ MODEL LOADING ----------------------------------------------\\
 
-load_model :: proc(name: cstring)
+load_model :: proc(name: cstring) -> ^Mesh
 {
 	data, result := cgltf.parse_file({}, name)
 	if result != .success  
@@ -1933,8 +2004,11 @@ load_model :: proc(name: cstring)
 		v.col = 1
 	}
 
-	app.indices = indices
-	app.vertices = vertices
+	mesh := new(Mesh)
+	mesh.indices = indices
+	mesh.vertices = vertices
+
+	return mesh
 }
 
 parse_mesh_data :: proc(acc: ^cgltf.accessor, $T: typeid) -> []T
@@ -1971,7 +2045,7 @@ input: Input
 
 init_game :: proc()
 {
-	camera.position = {0, 0, -1}
+	camera.position = {0, 0.1, -1}
 	camera.speed = 2.5
 }
 
@@ -2023,4 +2097,3 @@ update_fps :: proc()
 		fps = 0
 	}
 }
-
