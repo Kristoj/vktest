@@ -192,6 +192,7 @@ init_vulkan :: proc()
 	// plane   := load_model("res/models/plane.glb")
 	handle := create_render_batch({
 		load_model("res/models/plane.glb"),
+		load_model("res/models/plane2.glb"),
 		load_model("res/models/spitter.gltf"),
 	})
 
@@ -413,7 +414,7 @@ create_instance :: proc()
 		createInfo.ppEnabledLayerNames = raw_data(validationLayers)
 
 		populate_debug_messenger_create_info(&debugCreateInfo)
-		createInfo.pNext = rawptr(&debugCreateInfo) // FIX maybe wrong 
+		createInfo.pNext = rawptr(&debugCreateInfo) 
 	}
 	else
 	{
@@ -626,8 +627,8 @@ create_swapchain :: proc()
 	createInfo.compositeAlpha = {.OPAQUE}
 	createInfo.presentMode = mode
 	createInfo.clipped = true
-	createInfo.oldSwapchain = NULL_HANDLE // FIXME maybe this is wrong hey
-
+	createInfo.oldSwapchain = NULL_HANDLE
+	
 	result := vk.CreateSwapchainKHR(app.device, &createInfo, nil, &app.swapchain)
 	if result != .SUCCESS
 	{
@@ -1293,14 +1294,14 @@ buf: ^vk.Buffer, bufMem: ^vk.DeviceMemory)
 create_vertex_buffer :: proc(handle: RenderBatchHandle)
 {
 	batch := &renderBatches[handle]
-	bufSize := vk.DeviceSize(size_of(batch.vertices[0]) * len(batch.vertices))
+	bufSize := vk.DeviceSize(size_of(Vertex) * len(batch.vertices))
 	stagingBuf: vk.Buffer
 	stagingMem: vk.DeviceMemory
 	create_buffer(bufSize, {.TRANSFER_SRC}, {.HOST_VISIBLE, .HOST_COHERENT}, &stagingBuf, &stagingMem)
 
 	data: rawptr
 	vk.MapMemory(app.device, stagingMem, 0, bufSize, nil, &data)
-	mem.copy(data, &batch.vertices[0], int(bufSize))
+	mem.copy(data, raw_data(batch.vertices), int(bufSize))
 	vk.UnmapMemory(app.device, stagingMem)
 
 	create_buffer(bufSize, {.TRANSFER_DST, .VERTEX_BUFFER}, {.DEVICE_LOCAL}, &app.vertexBuffer, &app.vertexBufferMemory)
@@ -1321,7 +1322,7 @@ create_index_buffer :: proc(handle: RenderBatchHandle)
 
 	data: rawptr
 	vk.MapMemory(app.device, stagingMem, 0, bufSize, nil, &data)
-	mem.copy(data, &batch.indices[0], int(bufSize))
+	mem.copy(data, raw_data(batch.indices), int(bufSize))
 	vk.UnmapMemory(app.device, stagingMem)
 
 	create_buffer(bufSize, {.TRANSFER_DST, .INDEX_BUFFER}, {.DEVICE_LOCAL}, &app.indexBuffer, &app.indexBufferMemory)
@@ -1617,8 +1618,10 @@ record_command_buffer :: proc(cmdBuf: vk.CommandBuffer, index: u32)
 	vk.CmdBindDescriptorSets(cmdBuf, .GRAPHICS, app.pipelineLayout, 0, 1, &app.descriptorSets[app.currentFrame], 0, nil)
 
 	// vk.CmdDrawIndexed(cmdBuf, u32(len(renderBatches[0].indices)), 1, 0, 0, 0)
-	// bat := &renderBatches[0]
+	bat := &renderBatches[0]
 	// vk.CmdDrawIndexed(cmdBuf, bat.counts[1], 1, bat.offsets[1], 0, 0)
+	// vk.CmdDrawIndexed(cmdBuf, 6, 1, 0, 0, 0)
+	// vk.CmdDrawIndexed(cmdBuf, 12, 1, 6, 0, 0)
 	
 	for batch in renderBatches
 	{
@@ -1643,7 +1646,7 @@ create_shader_module :: proc(code: []byte) -> vk.ShaderModule
 	createInfo.sType = .SHADER_MODULE_CREATE_INFO
 	createInfo.codeSize = len(code)
 	
-	// FIX Aligment maybe fucked
+	// NOTE: Aligment maybe fucked
 	createInfo.pCode = cast(^u32)raw_data(code)
 
 	shaderModule: vk.ShaderModule
@@ -1948,10 +1951,17 @@ create_render_batch :: proc(meshes: []^Mesh) -> RenderBatchHandle
 	vertices: [dynamic]Vertex
 	indices:  [dynamic]u16
 	
+	prevLen: u16
 	for mesh, i in meshes
 	{
+		// append(&indices,  ..mesh.indices)
+		prevLen = u16(len(vertices))
+		for ind in mesh.indices
+		{
+			append(&indices, ind + prevLen)
+		}
+		
 		append(&vertices, ..mesh.vertices)
-		append(&indices,  ..mesh.indices)
 
 		batch.offsets[i] = offset
 		batch.counts[i] = u32(len(mesh.indices))
